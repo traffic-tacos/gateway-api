@@ -1,0 +1,59 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+docs/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test files
+*_test.go
+coverage.out
+coverage.html
+
+# Development files
+.env
+.env.local
+.env.*.local
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Build artifacts
+/bin/
+/dist/
+/build/
+
+# Cursor rules (not needed in container)
+.cursor/
+
+# Mock data (optional for production builds)
+mocks/
+
+# Development scripts
+scripts/
