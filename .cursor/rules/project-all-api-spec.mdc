@@ -383,8 +383,8 @@ Content-Type: application/json
 ```
 
 ### 이벤트 처리 로직
-- **reservation.hold.expired** → `inventory-svc.ReleaseHold()`
-- **payment.approved** → `inventory-svc.CommitReservation()`
+- **reservation.hold.expired** → `inventory-api.ReleaseHold()`
+- **payment.approved** → `inventory-api.CommitReservation()`
 - **멱등성 보장**: reservation_id 기반 중복 처리 방지
 - **신뢰성**: DLQ + 최대 재시도 + 배치 처리
 
