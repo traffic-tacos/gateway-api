@@ -1,59 +1,54 @@
-# Git
+# Development files
 .git
 .gitignore
-
-# Documentation
-README.md
-docs/
-
-# IDE and editor files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Test files
-*_test.go
-coverage.out
-coverage.html
-
-# Development files
 .env
 .env.local
 .env.*.local
 
-# Docker files
-Dockerfile*
-docker-compose*.yml
-.dockerignore
+# Documentation
+README.md
+docs/
+*.md
 
-# CI/CD
-.github/
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
 
 # Temporary files
 tmp/
 temp/
 *.tmp
 
+# Test files
+*_test.go
+test/
+tests/
+coverage.out
+
 # Build artifacts
-/bin/
-/dist/
-/build/
+bin/
+dist/
+build/
 
-# Cursor rules (not needed in container)
-.cursor/
+# Logs
+*.log
+logs/
 
-# Mock data (optional for production builds)
-mocks/
+# OS files
+.DS_Store
+Thumbs.db
 
-# Development scripts
-scripts/
+# Node modules (if any)
+node_modules/
+
+# Go specific
+vendor/
+*.mod.bak
+*.sum.bak
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore

@@ -1,75 +1,162 @@
 package routes
 
 import (
-	"github.com/gofiber/fiber/v2"
+	"time"
+
+	"github.com/traffic-tacos/gateway-api/internal/clients"
 	"github.com/traffic-tacos/gateway-api/internal/config"
-	"github.com/traffic-tacos/gateway-api/internal/logging"
-	"github.com/traffic-tacos/gateway-api/internal/metrics"
 	"github.com/traffic-tacos/gateway-api/internal/middleware"
+	"github.com/traffic-tacos/gateway-api/internal/metrics"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/swagger"
+	"github.com/sirupsen/logrus"
 )
 
-// SetupRoutes configures all API routes
-func SetupRoutes(api fiber.Router, cfg *config.Config, logger *logging.Logger, metrics *metrics.Metrics, mw *middleware.Manager) error {
-	// Apply common middleware
-	api.Use(mw.Tracing())
-	api.Use(mw.AuthRequired())
-	api.Use(mw.SecurityHeaders())
+// Setup configures all API routes
+func Setup(app *fiber.App, cfg *config.Config, logger *logrus.Logger, middlewareManager *middleware.Manager) {
+	// Initialize clients
+	reservationClient := clients.NewReservationClient(&cfg.Backend.ReservationAPI, logger)
+	paymentClient := clients.NewPaymentClient(&cfg.Backend.PaymentAPI, logger)
 
-	// Queue routes (may be anonymous)
-	queueGroup := api.Group("/queue")
-	queueHandler := setupQueueRoutes(queueGroup, cfg, logger, metrics, mw)
-	queueHandler.SetTracing(mw.tracing)
+	// Create route handlers
+	queueHandler := NewQueueHandler(middlewareManager.RedisClient, logger)
+	reservationHandler := NewReservationHandler(reservationClient, logger)
+	paymentHandler := NewPaymentHandler(paymentClient, logger)
 
-	// Reservation routes (authenticated, idempotent)
-	reservationGroup := api.Group("/reservations")
-	reservationHandler := setupReservationRoutes(reservationGroup, cfg, logger, metrics, mw)
-	reservationHandler.SetTracing(mw.tracing)
+	// Health check endpoints (no auth required)
+	app.Get("/healthz", healthCheck)
+	app.Get("/readyz", readinessCheck(middlewareManager))
+	app.Get("/version", versionHandler)
 
-	// Payment routes (authenticated, idempotent)
-	paymentGroup := api.Group("/payment")
-	paymentHandler := setupPaymentRoutes(paymentGroup, cfg, logger, metrics, mw)
-	paymentHandler.SetTracing(mw.tracing)
+	// Metrics endpoint (no auth required)
+	app.Get(cfg.Observability.MetricsPath, metrics.PrometheusHandler())
 
-	return nil
+	// Swagger documentation endpoint (no auth required)
+	app.Get("/swagger/*", swagger.HandlerDefault)
+
+	// API routes with middleware
+	api := app.Group("/api/v1")
+
+	// Apply global middleware to API routes
+	api.Use(metrics.HTTPMetricsMiddleware())
+	api.Use(middlewareManager.RateLimit.Handle())
+	api.Use(middlewareManager.Idempotency.Handle())
+	api.Use(middlewareManager.Idempotency.ResponseCapture())
+
+	// Queue management routes (public endpoints - no auth required)
+	queueRoutes := api.Group("/queue")
+	queueRoutes.Post("/join", queueHandler.Join)
+	queueRoutes.Get("/status", queueHandler.Status)
+	queueRoutes.Post("/enter", queueHandler.Enter)
+	queueRoutes.Delete("/leave", queueHandler.Leave)
+
+	// Protected routes (require authentication)
+	exemptPaths := []string{"/healthz", "/readyz", "/version", "/metrics", "/swagger", "/api/v1/queue/join", "/api/v1/queue/status"}
+	protected := api.Use(middlewareManager.Auth.Authenticate(exemptPaths))
+
+	// Reservation routes
+	reservationRoutes := protected.Group("/reservations")
+	reservationRoutes.Post("/", reservationHandler.Create)
+	reservationRoutes.Get("/:id", reservationHandler.Get)
+	reservationRoutes.Post("/:id/confirm", reservationHandler.Confirm)
+	reservationRoutes.Post("/:id/cancel", reservationHandler.Cancel)
+
+	// Payment routes
+	paymentRoutes := protected.Group("/payment")
+	paymentRoutes.Post("/intent", paymentHandler.CreateIntent)
+	paymentRoutes.Get("/:id/status", paymentHandler.GetStatus)
+	paymentRoutes.Post("/process", paymentHandler.ProcessPayment)
+
+	// 404 handler
+	app.Use(notFoundHandler)
 }
 
-// setupQueueRoutes configures queue-related routes
-func setupQueueRoutes(router fiber.Router, cfg *config.Config, logger *logging.Logger, metrics *metrics.Metrics, mw *middleware.Manager) *QueueHandler {
-	handler := NewQueueHandler(cfg, logger, metrics)
-
-	router.Post("/join", handler.JoinQueue)
-	router.Get("/status", handler.GetQueueStatus)
-
-	return handler
+// healthCheck returns the health status of the service
+// @Summary Health check
+// @Description Check if the service is healthy
+// @Tags System
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Healthy"
+// @Router /healthz [get]
+func healthCheck(c *fiber.Ctx) error {
+	return c.JSON(fiber.Map{
+		"status":    "healthy",
+		"timestamp": time.Now().UTC(),
+		"service":   "gateway-api",
+	})
 }
 
-// setupReservationRoutes configures reservation-related routes
-func setupReservationRoutes(router fiber.Router, cfg *config.Config, logger *logging.Logger, metrics *metrics.Metrics, mw *middleware.Manager) *ReservationHandler {
-	handler := NewReservationHandler(cfg, logger, metrics)
+// readinessCheck checks if the service is ready to accept traffic
+// @Summary Readiness check
+// @Description Check if the service is ready to accept traffic
+// @Tags System
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Ready"
+// @Failure 503 {object} map[string]interface{} "Not ready"
+// @Router /readyz [get]
+func readinessCheck(middlewareManager *middleware.Manager) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		// Check Redis connectivity
+		redisHealthCheck := middleware.RedisHealthCheck(middlewareManager.RedisClient, middlewareManager.Logger)
+		if err := redisHealthCheck(); err != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"status":  "not ready",
+				"reason":  "redis unavailable",
+				"error":   err.Error(),
+				"timestamp": time.Now().UTC(),
+			})
+		}
 
-	// Apply idempotency to write operations
-	router.Use("/create", mw.IdempotencyRequired())
-	router.Use("/cancel", mw.IdempotencyRequired())
-	router.Use("/confirm", mw.IdempotencyRequired())
-
-	router.Post("/create", handler.CreateReservation)
-	router.Post("/:id/cancel", handler.CancelReservation)
-	router.Post("/:id/confirm", handler.ConfirmReservation)
-	router.Get("/:id", handler.GetReservation)
-	router.Get("/", handler.ListReservations)
-
-	return handler
+		return c.JSON(fiber.Map{
+			"status":    "ready",
+			"timestamp": time.Now().UTC(),
+			"service":   "gateway-api",
+		})
+	}
 }
 
-// setupPaymentRoutes configures payment-related routes
-func setupPaymentRoutes(router fiber.Router, cfg *config.Config, logger *logging.Logger, metrics *metrics.Metrics, mw *middleware.Manager) *PaymentHandler {
-	handler := NewPaymentHandler(cfg, logger, metrics)
+// versionHandler returns version information
+// @Summary Version information
+// @Description Get service version and build information
+// @Tags System
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Version info"
+// @Router /version [get]
+func versionHandler(c *fiber.Ctx) error {
+	return c.JSON(fiber.Map{
+		"service": "gateway-api",
+		"version": getVersion(),
+		"commit":  getCommit(),
+		"built":   getBuildTime(),
+	})
+}
 
-	// Apply idempotency to payment operations
-	router.Use("/intent", mw.IdempotencyRequired())
 
-	router.Post("/intent", handler.CreatePaymentIntent)
-	router.Get("/intent/:id", handler.GetPaymentIntent)
+// notFoundHandler handles 404 errors
+func notFoundHandler(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     "NOT_FOUND",
+			"message":  "The requested resource was not found",
+			"path":     c.Path(),
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
+}
 
-	return handler
+// Helper functions for version info
+func getVersion() string {
+	// This would typically be set during build
+	return "dev"
+}
+
+func getCommit() string {
+	// This would typically be set during build
+	return "unknown"
+}
+
+func getBuildTime() string {
+	// This would typically be set during build
+	return "unknown"
 }

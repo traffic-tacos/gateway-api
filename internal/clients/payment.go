@@ -10,137 +10,214 @@ import (
 	"time"
 
 	"github.com/traffic-tacos/gateway-api/internal/config"
-	"github.com/traffic-tacos/gateway-api/internal/logging"
-	"github.com/traffic-tacos/gateway-api/internal/metrics"
-	"github.com/traffic-tacos/gateway-api/internal/middleware"
+
+	"github.com/sirupsen/logrus"
 )
 
-// PaymentClient handles communication with payment-sim-api
 type PaymentClient struct {
 	baseURL    string
 	httpClient *http.Client
-	logger     *logging.Logger
-	metrics    *metrics.Metrics
-	tracing    *middleware.TracingMiddleware
+	logger     *logrus.Logger
 }
 
-// NewPaymentClient creates a new payment client
-func NewPaymentClient(cfg *config.Config, logger *logging.Logger, metrics *metrics.Metrics) *PaymentClient {
-	// Create HTTP client with timeout
-	httpClient := &http.Client{
-		Timeout: cfg.Upstream.Payment.Timeout,
+// Payment request/response models
+type CreatePaymentIntentRequest struct {
+	ReservationID string `json:"reservation_id"`
+	Amount        int64  `json:"amount"`
+	Currency      string `json:"currency"`
+	Scenario      string `json:"scenario"` // approve|fail|delay|random
+}
+
+type PaymentIntentResponse struct {
+	PaymentIntentID string `json:"payment_intent_id"`
+	Status          string `json:"status"`
+	Amount          int64  `json:"amount"`
+	Currency        string `json:"currency"`
+	ReservationID   string `json:"reservation_id"`
+	CreatedAt       time.Time `json:"created_at"`
+	Next            string `json:"next,omitempty"`
+}
+
+type PaymentStatusResponse struct {
+	PaymentIntentID string    `json:"payment_intent_id"`
+	Status          string    `json:"status"`
+	Amount          int64     `json:"amount"`
+	Currency        string    `json:"currency"`
+	ReservationID   string    `json:"reservation_id"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	ProcessedAt     *time.Time `json:"processed_at,omitempty"`
+}
+
+func NewPaymentClient(cfg *config.PaymentAPIConfig, logger *logrus.Logger) *PaymentClient {
+	// Create HTTP client with timeout and retry configuration
+	client := &http.Client{
+		Timeout: cfg.Timeout,
 		Transport: &http.Transport{
 			MaxIdleConns:        100,
-			MaxConnsPerHost:     10,
-			MaxIdleConnsPerHost: 10,
+			MaxIdleConnsPerHost: 20,
 			IdleConnTimeout:     90 * time.Second,
+			DisableKeepAlives:   false,
 		},
 	}
 
 	return &PaymentClient{
-		baseURL:    cfg.Upstream.Payment.BaseURL,
-		httpClient: httpClient,
+		baseURL:    cfg.BaseURL,
+		httpClient: client,
 		logger:     logger,
-		metrics:    metrics,
 	}
 }
 
-// SetTracing sets the tracing middleware
-func (c *PaymentClient) SetTracing(tracing *middleware.TracingMiddleware) {
-	c.tracing = tracing
-}
+// CreatePaymentIntent creates a new payment intent
+func (p *PaymentClient) CreatePaymentIntent(ctx context.Context, req *CreatePaymentIntentRequest, headers map[string]string) (*PaymentIntentResponse, error) {
+	url := fmt.Sprintf("%s/v1/sim/intent", p.baseURL)
 
-// CreatePaymentIntent forwards payment intent creation request
-func (c *PaymentClient) CreatePaymentIntent(ctx context.Context, request map[string]interface{}) (map[string]interface{}, error) {
-	return c.post(ctx, "/v1/sim/intent", request)
-}
+	resp, err := p.makeRequest(ctx, "POST", url, req, headers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create payment intent: %w", err)
+	}
+	defer resp.Body.Close()
 
-// GetPaymentIntent forwards payment intent retrieval request
-func (c *PaymentClient) GetPaymentIntent(ctx context.Context, intentID string) (map[string]interface{}, error) {
-	return c.get(ctx, fmt.Sprintf("/v1/sim/intent/%s", intentID), nil)
-}
-
-// Helper methods
-
-func (c *PaymentClient) get(ctx context.Context, path string, params map[string]string) (map[string]interface{}, error) {
-	return c.doRequest(ctx, "GET", path, params, nil)
-}
-
-func (c *PaymentClient) post(ctx context.Context, path string, body interface{}) (map[string]interface{}, error) {
-	return c.doRequest(ctx, "POST", path, nil, body)
-}
-
-func (c *PaymentClient) doRequest(ctx context.Context, method, path string, params map[string]string, body interface{}) (map[string]interface{}, error) {
-	start := time.Now()
-
-	// Build URL
-	url := c.baseURL + path
-	if params != nil && len(params) > 0 {
-		url += "?"
-		for k, v := range params {
-			url += fmt.Sprintf("%s=%s&", k, v)
-		}
-		url = url[:len(url)-1] // Remove trailing &
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, p.handleErrorResponse(resp, "create payment intent")
 	}
 
-	// Create request
-	var bodyReader io.Reader
+	var intent PaymentIntentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&intent); err != nil {
+		return nil, fmt.Errorf("failed to decode payment intent response: %w", err)
+	}
+
+	return &intent, nil
+}
+
+// GetPaymentStatus retrieves payment status by intent ID
+func (p *PaymentClient) GetPaymentStatus(ctx context.Context, paymentIntentID string, headers map[string]string) (*PaymentStatusResponse, error) {
+	url := fmt.Sprintf("%s/v1/sim/intents/%s", p.baseURL, paymentIntentID)
+
+	resp, err := p.makeRequest(ctx, "GET", url, nil, headers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get payment status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, p.handleErrorResponse(resp, "get payment status")
+	}
+
+	var status PaymentStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("failed to decode payment status response: %w", err)
+	}
+
+	return &status, nil
+}
+
+// ProcessPayment manually triggers payment processing (for testing)
+type ProcessPaymentRequest struct {
+	PaymentIntentID string `json:"payment_intent_id"`
+	Action          string `json:"action"` // approve|fail
+}
+
+func (p *PaymentClient) ProcessPayment(ctx context.Context, req *ProcessPaymentRequest, headers map[string]string) error {
+	url := fmt.Sprintf("%s/v1/sim/webhook/test", p.baseURL)
+
+	resp, err := p.makeRequest(ctx, "POST", url, req, headers)
+	if err != nil {
+		return fmt.Errorf("failed to process payment: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return p.handleErrorResponse(resp, "process payment")
+	}
+
+	return nil
+}
+
+// makeRequest makes an HTTP request with proper headers and context
+func (p *PaymentClient) makeRequest(ctx context.Context, method, url string, body interface{}, headers map[string]string) (*http.Response, error) {
+	var reqBody io.Reader
 	if body != nil {
-		bodyBytes, err := json.Marshal(body)
+		jsonData, err := json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
-		bodyReader = bytes.NewReader(bodyBytes)
+		reqBody = bytes.NewBuffer(jsonData)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	// Inject tracing headers if available
-	if c.tracing != nil {
-		tracingHeaders := c.tracing.InjectHeaders(ctx)
-		for k, v := range tracingHeaders {
-			req.Header.Set(k, v)
-		}
+	// Set default headers
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 
-	// Execute request
-	resp, err := c.httpClient.Do(req)
+	// Set custom headers
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	// Log request
+	p.logger.WithFields(logrus.Fields{
+		"method": method,
+		"url":    url,
+		"headers": p.sanitizeHeaders(headers),
+	}).Debug("Making payment API request")
+
+	start := time.Now()
+	resp, err := p.httpClient.Do(req)
+	latency := time.Since(start)
+
+	// Log response
+	p.logger.WithFields(logrus.Fields{
+		"method":      method,
+		"url":         url,
+		"status_code": p.getStatusCode(resp),
+		"latency_ms":  latency.Milliseconds(),
+	}).Debug("Payment API response")
+
 	if err != nil {
-		c.recordMetrics("payment", method, 0, time.Since(start))
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
 
-	// Record metrics
-	c.recordMetrics("payment", method, resp.StatusCode, time.Since(start))
-
-	// Read response
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Check status
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("upstream error: %s", string(respBody))
-	}
-
-	// Parse JSON response
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return result, nil
+	return resp, nil
 }
 
-func (c *PaymentClient) recordMetrics(service, method string, statusCode int, duration time.Duration) {
-	c.metrics.RecordBackendCall(service, method, statusCode, duration)
+// handleErrorResponse handles error responses from the payment API
+func (p *PaymentClient) handleErrorResponse(resp *http.Response, operation string) error {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("%s failed with status %d: failed to read error response", operation, resp.StatusCode)
+	}
+
+	var errorResp ErrorResponse
+	if err := json.Unmarshal(body, &errorResp); err != nil {
+		return fmt.Errorf("%s failed with status %d: %s", operation, resp.StatusCode, string(body))
+	}
+
+	return fmt.Errorf("%s failed: %s (%s)", operation, errorResp.Error.Message, errorResp.Error.Code)
+}
+
+// sanitizeHeaders removes sensitive headers for logging
+func (p *PaymentClient) sanitizeHeaders(headers map[string]string) map[string]string {
+	sanitized := make(map[string]string)
+	for key, value := range headers {
+		if key == "Authorization" {
+			sanitized[key] = "Bearer [REDACTED]"
+		} else {
+			sanitized[key] = value
+		}
+	}
+	return sanitized
+}
+
+// getStatusCode safely gets status code from response
+func (p *PaymentClient) getStatusCode(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
 }

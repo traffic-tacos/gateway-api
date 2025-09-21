@@ -1,131 +1,80 @@
 package logging
 
 import (
-	"context"
 	"os"
 
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	"github.com/traffic-tacos/gateway-api/internal/config"
+
+	"github.com/sirupsen/logrus"
 )
 
-// Logger wraps zap.Logger with additional context methods
-type Logger struct {
-	*zap.Logger
-}
+// New creates a new structured logger
+func New(cfg *config.Config) *logrus.Logger {
+	logger := logrus.New()
 
-// NewLogger creates a new structured logger
-func NewLogger(serviceName string) (*Logger, error) {
-	config := zap.NewProductionConfig()
-
-	// Set log level from environment
-	logLevel := os.Getenv("LOG_LEVEL")
-	if logLevel == "" {
-		logLevel = "info"
-	}
-
-	level, err := zapcore.ParseLevel(logLevel)
+	// Set log level
+	level, err := logrus.ParseLevel(cfg.Log.Level)
 	if err != nil {
-		level = zapcore.InfoLevel
+		logger.Warn("Invalid log level, defaulting to info")
+		level = logrus.InfoLevel
 	}
-	config.Level = zap.NewAtomicLevelAt(level)
+	logger.SetLevel(level)
 
-	// JSON encoder for structured logging
-	config.Encoding = "json"
-	config.EncoderConfig.TimeKey = "ts"
-	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	config.EncoderConfig.EncodeLevel = zapcore.LowercaseLevelEncoder
-
-	// Add service name
-	config.InitialFields = map[string]interface{}{
-		"service": serviceName,
-	}
-
-	zapLogger, err := config.Build(
-		zap.AddCaller(),
-		zap.AddStacktrace(zapcore.ErrorLevel),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Logger{zapLogger}, nil
-}
-
-// WithContext adds context fields to logger
-func (l *Logger) WithContext(ctx context.Context) *Logger {
-	if traceID := getTraceIDFromContext(ctx); traceID != "" {
-		return &Logger{l.Logger.With(zap.String("trace_id", traceID))}
-	}
-	return l
-}
-
-// WithFields adds additional fields to logger
-func (l *Logger) WithFields(fields ...zap.Field) *Logger {
-	return &Logger{l.Logger.With(fields...)}
-}
-
-// WithUser adds user information to logger
-func (l *Logger) WithUser(userID string) *Logger {
-	return &Logger{l.Logger.With(zap.String("user_id", userID))}
-}
-
-// WithRequest adds HTTP request information to logger
-func (l *Logger) WithRequest(method, path string, status int, latency float64) *Logger {
-	return &Logger{l.Logger.With(
-		zap.String("http.method", method),
-		zap.String("http.path", path),
-		zap.Int("http.status", status),
-		zap.Float64("latency_ms", latency),
-	)}
-}
-
-// RequestLogger logs HTTP request details
-func (l *Logger) RequestLogger(method, path string, status int, latency float64, userID, traceID string) {
-	fields := []zap.Field{
-		zap.String("http.method", method),
-		zap.String("http.path", path),
-		zap.Int("http.status", status),
-		zap.Float64("latency_ms", latency),
+	// Set output format
+	if cfg.Log.Format == "json" {
+		logger.SetFormatter(&logrus.JSONFormatter{
+			TimestampFormat: "2006-01-02T15:04:05.000Z",
+			FieldMap: logrus.FieldMap{
+				logrus.FieldKeyTime:  "ts",
+				logrus.FieldKeyLevel: "level",
+				logrus.FieldKeyMsg:   "msg",
+			},
+		})
+	} else {
+		logger.SetFormatter(&logrus.TextFormatter{
+			FullTimestamp:   true,
+			TimestampFormat: "2006-01-02T15:04:05.000Z",
+		})
 	}
 
-	if userID != "" {
-		fields = append(fields, zap.String("user_id", userID))
+	logger.SetOutput(os.Stdout)
+
+	// Add default fields
+	logger = logger.WithFields(logrus.Fields{
+		"service":     "gateway-api",
+		"version":     getVersion(),
+		"environment": cfg.Server.Environment,
+	}).Logger
+
+	return logger
+}
+
+// getVersion returns the application version
+func getVersion() string {
+	if version := os.Getenv("APP_VERSION"); version != "" {
+		return version
 	}
-	if traceID != "" {
-		fields = append(fields, zap.String("trace_id", traceID))
-	}
-
-	l.Logger.Info("request_completed", fields...)
+	return "dev"
 }
 
-// Error logs error with context
-func (l *Logger) ErrorWithContext(ctx context.Context, msg string, err error, fields ...zap.Field) {
-	logger := l.WithContext(ctx)
-	allFields := append(fields, zap.Error(err))
-	logger.Logger.Error(msg, allFields...)
+// WithTraceID adds trace ID to logger context
+func WithTraceID(logger *logrus.Logger, traceID string) *logrus.Entry {
+	return logger.WithField("trace_id", traceID)
 }
 
-// WarnWithContext logs warning with context
-func (l *Logger) WarnWithContext(ctx context.Context, msg string, fields ...zap.Field) {
-	logger := l.WithContext(ctx)
-	logger.Logger.Warn(msg, fields...)
+// WithUserID adds user ID to logger context
+func WithUserID(logger *logrus.Logger, userID string) *logrus.Entry {
+	return logger.WithField("user_id", userID)
 }
 
-// InfoWithContext logs info with context
-func (l *Logger) InfoWithContext(ctx context.Context, msg string, fields ...zap.Field) {
-	logger := l.WithContext(ctx)
-	logger.Logger.Info(msg, fields...)
-}
-
-// DebugWithContext logs debug with context
-func (l *Logger) DebugWithContext(ctx context.Context, msg string, fields ...zap.Field) {
-	logger := l.WithContext(ctx)
-	logger.Logger.Debug(msg, fields...)
-}
-
-// getTraceIDFromContext extracts trace ID from context
-// This will be implemented when we add tracing context
-func getTraceIDFromContext(ctx context.Context) string {
-	// TODO: Implement when tracing is added
-	return ""
+// WithRequest adds request context to logger
+func WithRequest(logger *logrus.Logger, method, path string, statusCode int, latencyMs float64) *logrus.Entry {
+	return logger.WithFields(logrus.Fields{
+		"http": map[string]interface{}{
+			"method": method,
+			"route":  path,
+			"status": statusCode,
+		},
+		"latency_ms": latencyMs,
+	})
 }

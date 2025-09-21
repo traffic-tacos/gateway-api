@@ -1,4 +1,4 @@
-# Build stage
+# Multi-stage build for Go application
 FROM golang:1.22-alpine AS builder
 
 # Install build dependencies
@@ -17,44 +17,33 @@ RUN go mod download
 COPY . .
 
 # Build the application
-# CGO_ENABLED=0 for static linking
-# GOOS=linux for Linux binary
-# -a flag to force rebuild
-# -installsuffix cgo to avoid cache conflicts
-# -o for output filename
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -a \
-    -installsuffix cgo \
-    -o gateway-api \
-    ./cmd/gateway
+    -ldflags='-w -s -extldflags "-static"' \
+    -a -installsuffix cgo \
+    -o gateway-api ./cmd/gateway
 
-# Verify the binary
-RUN ./gateway-api --help || true
+# Production stage
+FROM scratch
 
-# Runtime stage
-FROM alpine:latest
-
-# Install ca-certificates, timezone data, and curl for health checks
-RUN apk --no-cache add ca-certificates tzdata curl && \
-    addgroup -g 10001 -S appgroup && \
-    adduser -u 10001 -S appuser -G appgroup
-
-# Import certificates and timezone from builder stage
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# Copy timezone data and SSL certificates
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-# Copy the binary from builder stage
-COPY --from=builder --chown=appuser:appgroup /app/gateway-api /gateway-api
+# Create non-root user files
+COPY --from=builder /etc/passwd /etc/passwd
 
-# Switch to non-root user
-USER appuser
+# Copy the binary
+COPY --from=builder /app/gateway-api /gateway-api
+
+# Create a non-root user
+USER 10001:10001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/gateway-api", "--health-check"]
 
 # Expose port
-EXPOSE 8080
+EXPOSE 8000
 
-# Health check using curl
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/healthz || exit 1
-
-# Set the binary as entrypoint
+# Run the application
 ENTRYPOINT ["/gateway-api"]

@@ -2,206 +2,229 @@ package middleware
 
 import (
 	"context"
-	"crypto/rsa"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/lestrrat-go/jwx/v2/jwa"
-	"github.com/lestrrat-go/jwx/v2/jwk"
-	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/traffic-tacos/gateway-api/internal/config"
-	"github.com/traffic-tacos/gateway-api/internal/logging"
-	"github.com/traffic-tacos/gateway-api/pkg/errors"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jws"
+	"github.com/redis/go-redis/v9"
+	"github.com/sirupsen/logrus"
 )
 
-// AuthMiddleware handles JWT authentication
 type AuthMiddleware struct {
-	jwksURL    string
-	issuer     string
-	audience   string
-	cacheTTL   time.Duration
-	skipVerify bool
-	jwkSet     *jwk.Set
-	cacheTime  time.Time
-	logger     *logging.Logger
+	config     *config.JWTConfig
+	redisClient *redis.Client
+	logger     *logrus.Logger
+	jwkCache   jwk.Cache
 }
 
-// NewAuthMiddleware creates a new auth middleware
-func NewAuthMiddleware(cfg config.JWTConfig, logger *logging.Logger) (*AuthMiddleware, error) {
+func NewAuthMiddleware(cfg *config.JWTConfig, redisClient *redis.Client, logger *logrus.Logger) (*AuthMiddleware, error) {
+	// Create JWK cache
+	cache := jwk.NewCache(context.Background())
+
+	// Register the JWKS endpoint
+	if err := cache.Register(cfg.JWKSEndpoint, jwk.WithMinRefreshInterval(cfg.CacheTTL)); err != nil {
+		return nil, fmt.Errorf("failed to register JWKS endpoint: %w", err)
+	}
+
+	// Pre-fetch the keys
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := cache.Refresh(ctx, cfg.JWKSEndpoint); err != nil {
+		logger.WithError(err).Warn("Failed to pre-fetch JWKS, will try during first request")
+	}
+
 	return &AuthMiddleware{
-		jwksURL:    cfg.JWKSURL,
-		issuer:     cfg.Issuer,
-		audience:   cfg.Audience,
-		cacheTTL:   cfg.CacheTTL,
-		skipVerify: cfg.SkipVerify,
-		logger:     logger,
+		config:      cfg,
+		redisClient: redisClient,
+		logger:      logger,
+		jwkCache:    cache,
 	}, nil
 }
 
-// AuthRequired returns the authentication middleware
-func (a *AuthMiddleware) AuthRequired() fiber.Handler {
+// JWT authentication middleware
+func (a *AuthMiddleware) Authenticate(exemptPaths []string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		// Check if route is anonymous
+		// Check if path is exempt from authentication
 		path := c.Path()
-		if a.isAnonymousRoute(path) {
-			return c.Next()
+		for _, exemptPath := range exemptPaths {
+			if strings.HasPrefix(path, exemptPath) {
+				return c.Next()
+			}
 		}
 
 		// Extract token from Authorization header
 		authHeader := c.Get("Authorization")
 		if authHeader == "" {
-			return errors.NewAppError(errors.CodeUnauthenticated, "Authorization header is required", nil)
+			return a.unauthorizedError(c, "MISSING_AUTHORIZATION", "Authorization header is required")
 		}
 
-		tokenStr, err := a.extractBearerToken(authHeader)
+		// Check Bearer token format
+		const bearerPrefix = "Bearer "
+		if !strings.HasPrefix(authHeader, bearerPrefix) {
+			return a.unauthorizedError(c, "INVALID_TOKEN_FORMAT", "Authorization header must be Bearer token")
+		}
+
+		tokenString := authHeader[len(bearerPrefix):]
+		if tokenString == "" {
+			return a.unauthorizedError(c, "MISSING_TOKEN", "Token is required")
+		}
+
+		// Validate JWT token
+		claims, err := a.validateToken(c.Context(), tokenString)
 		if err != nil {
-			return errors.NewAppError(errors.CodeUnauthenticated, "Invalid authorization header format", err)
+			a.logger.WithError(err).WithField("path", path).Debug("Token validation failed")
+			return a.unauthorizedError(c, "INVALID_TOKEN", "Token validation failed")
 		}
 
-		// Verify and parse token
-		claims, err := a.verifyToken(c.Context(), tokenStr)
-		if err != nil {
-			a.logger.WarnWithContext(c.Context(), "JWT verification failed", "error", err.Error())
-			return err
-		}
-
-		// Extract user information
-		userID, ok := claims["sub"].(string)
-		if !ok || userID == "" {
-			return errors.NewAppError(errors.CodeForbidden, "Invalid token: missing subject", nil)
-		}
-
-		// Store user information in context
-		c.Locals("user_id", userID)
+		// Set user context
 		c.Locals("user_claims", claims)
+		if userID, ok := claims["sub"].(string); ok {
+			c.Locals("user_id", userID)
+		}
 
 		return c.Next()
 	}
 }
 
-// extractBearerToken extracts the token from Authorization header
-func (a *AuthMiddleware) extractBearerToken(authHeader string) (string, error) {
-	const bearerPrefix = "Bearer "
-	if !strings.HasPrefix(authHeader, bearerPrefix) {
-		return "", fmt.Errorf("authorization header must start with 'Bearer '")
-	}
-	return strings.TrimPrefix(authHeader, bearerPrefix), nil
-}
-
-// verifyToken verifies and parses the JWT token
-func (a *AuthMiddleware) verifyToken(ctx context.Context, tokenStr string) (map[string]interface{}, error) {
-	// Parse token without verification first
-	token, err := jwt.Parse([]byte(tokenStr), jwt.WithVerify(false))
-	if err != nil {
-		return nil, errors.NewAppError(errors.CodeUnauthenticated, "Invalid JWT token format", err)
-	}
-
-	// Verify issuer and audience
-	if err := jwt.Validate(token,
-		jwt.WithIssuer(a.issuer),
-		jwt.WithAudience(a.audience),
-	); err != nil {
-		return nil, errors.NewAppError(errors.CodeForbidden, "Token validation failed", err)
-	}
-
-	// Skip signature verification if configured (for development)
-	if a.skipVerify {
-		claims, err := token.AsMap(ctx)
-		if err != nil {
-			return nil, errors.NewAppError(errors.CodeUnauthenticated, "Failed to extract token claims", err)
+// validateToken validates JWT token using JWKS
+func (a *AuthMiddleware) validateToken(ctx context.Context, tokenString string) (jwt.MapClaims, error) {
+	// Parse token without verification to get the key ID
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Get the key ID from token header
+		keyID, ok := token.Header["kid"].(string)
+		if !ok {
+			return nil, fmt.Errorf("kid not found in token header")
 		}
-		return claims, nil
-	}
 
-	// Verify signature using JWKS
-	if err := a.verifySignature(ctx, tokenStr); err != nil {
-		return nil, err
-	}
+		// Get JWK set from cache
+		set, err := a.jwkCache.Get(ctx, a.config.JWKSEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get JWK set: %w", err)
+		}
 
-	// Extract claims
-	claims, err := token.AsMap(ctx)
+		// Find the key with matching kid
+		key, found := set.LookupKeyID(keyID)
+		if !found {
+			return nil, fmt.Errorf("key with ID %s not found", keyID)
+		}
+
+		// Convert JWK to verification key
+		var verifyKey interface{}
+		if err := key.Raw(&verifyKey); err != nil {
+			return nil, fmt.Errorf("failed to get raw key: %w", err)
+		}
+
+		return verifyKey, nil
+	}, jwt.WithValidMethods([]string{"RS256", "ES256"}))
+
 	if err != nil {
-		return nil, errors.NewAppError(errors.CodeUnauthenticated, "Failed to extract token claims", err)
+		return nil, fmt.Errorf("token parsing failed: %w", err)
+	}
+
+	// Check if token is valid
+	if !token.Valid {
+		return nil, fmt.Errorf("token is invalid")
+	}
+
+	// Get claims
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, fmt.Errorf("failed to get token claims")
+	}
+
+	// Validate standard claims
+	if err := a.validateClaims(claims); err != nil {
+		return nil, fmt.Errorf("claims validation failed: %w", err)
 	}
 
 	return claims, nil
 }
 
-// verifySignature verifies the JWT signature using JWKS
-func (a *AuthMiddleware) verifySignature(ctx context.Context, tokenStr string) error {
-	// Fetch or use cached JWK Set
-	jwkSet, err := a.getJWKSet(ctx)
-	if err != nil {
-		return errors.NewAppError(errors.CodeUnauthenticated, "Failed to fetch JWK set", err)
+// validateClaims validates JWT standard claims
+func (a *AuthMiddleware) validateClaims(claims jwt.MapClaims) error {
+	// Validate expiration
+	if exp, ok := claims["exp"].(float64); ok {
+		if time.Now().Unix() > int64(exp) {
+			return fmt.Errorf("token has expired")
+		}
+	} else {
+		return fmt.Errorf("exp claim is required")
 	}
 
-	// Parse and verify token with JWK set
-	_, err = jwt.Parse([]byte(tokenStr),
-		jwt.WithKeySet(jwkSet),
-		jwt.WithIssuer(a.issuer),
-		jwt.WithAudience(a.audience),
-	)
-	if err != nil {
-		return errors.NewAppError(errors.CodeUnauthenticated, "Token signature verification failed", err)
+	// Validate not before
+	if nbf, ok := claims["nbf"].(float64); ok {
+		if time.Now().Unix() < int64(nbf) {
+			return fmt.Errorf("token not valid yet")
+		}
+	}
+
+	// Validate issuer
+	if iss, ok := claims["iss"].(string); ok {
+		if iss != a.config.Issuer {
+			return fmt.Errorf("invalid issuer: expected %s, got %s", a.config.Issuer, iss)
+		}
+	} else {
+		return fmt.Errorf("iss claim is required")
+	}
+
+	// Validate audience
+	if aud, ok := claims["aud"]; ok {
+		switch v := aud.(type) {
+		case string:
+			if v != a.config.Audience {
+				return fmt.Errorf("invalid audience: expected %s, got %s", a.config.Audience, v)
+			}
+		case []interface{}:
+			found := false
+			for _, audience := range v {
+				if audStr, ok := audience.(string); ok && audStr == a.config.Audience {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("invalid audience: %s not found in %v", a.config.Audience, v)
+			}
+		default:
+			return fmt.Errorf("aud claim must be string or array")
+		}
+	} else {
+		return fmt.Errorf("aud claim is required")
 	}
 
 	return nil
 }
 
-// getJWKSet fetches JWK set from cache or remote
-func (a *AuthMiddleware) getJWKSet(ctx context.Context) (*jwk.Set, error) {
-	now := time.Now()
-
-	// Return cached JWK set if still valid
-	if a.jwkSet != nil && now.Sub(a.cacheTime) < a.cacheTTL {
-		return a.jwkSet, nil
-	}
-
-	// Fetch new JWK set
-	resp, err := http.Get(a.jwksURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("JWKS endpoint returned status %d", resp.StatusCode)
-	}
-
-	// Parse JWK set
-	jwkSet, err := jwk.ParseReader(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse JWKS: %w", err)
-	}
-
-	// Update cache
-	a.jwkSet = &jwkSet
-	a.cacheTime = now
-
-	a.logger.InfoWithContext(ctx, "Updated JWK set cache")
-
-	return &jwkSet, nil
+// unauthorizedError returns a standardized unauthorized error response
+func (a *AuthMiddleware) unauthorizedError(c *fiber.Ctx, code, message string) error {
+	return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     code,
+			"message":  message,
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
 }
 
-// isAnonymousRoute checks if the route allows anonymous access
-func (a *AuthMiddleware) isAnonymousRoute(path string) bool {
-	anonymousRoutes := []string{
-		"/healthz",
-		"/readyz",
-		"/version",
-		"/metrics",
-		"/api/v1/queue/join",
-		"/api/v1/queue/status",
+// GetUserID extracts user ID from context
+func GetUserID(c *fiber.Ctx) string {
+	if userID, ok := c.Locals("user_id").(string); ok {
+		return userID
 	}
+	return ""
+}
 
-	for _, route := range anonymousRoutes {
-		if strings.HasPrefix(path, route) {
-			return true
-		}
+// GetUserClaims extracts user claims from context
+func GetUserClaims(c *fiber.Ctx) jwt.MapClaims {
+	if claims, ok := c.Locals("user_claims").(jwt.MapClaims); ok {
+		return claims
 	}
-	return false
+	return nil
 }

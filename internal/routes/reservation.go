@@ -1,260 +1,352 @@
 package routes
 
 import (
-	"time"
+	"github.com/traffic-tacos/gateway-api/internal/clients"
+	"github.com/traffic-tacos/gateway-api/internal/middleware"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/traffic-tacos/gateway-api/internal/clients"
-	"github.com/traffic-tacos/gateway-api/internal/config"
-	"github.com/traffic-tacos/gateway-api/internal/logging"
-	"github.com/traffic-tacos/gateway-api/internal/metrics"
-	"github.com/traffic-tacos/gateway-api/internal/middleware"
+	"github.com/sirupsen/logrus"
 )
 
-// ReservationHandler handles reservation-related requests
 type ReservationHandler struct {
-	config   *config.Config
-	logger   *logging.Logger
-	metrics  *metrics.Metrics
-	client   *clients.ReservationClient
+	client *clients.ReservationClient
+	logger *logrus.Logger
 }
 
-// NewReservationHandler creates a new reservation handler
-func NewReservationHandler(cfg *config.Config, logger *logging.Logger, metrics *metrics.Metrics) *ReservationHandler {
-	client := clients.NewReservationClient(cfg, logger, metrics)
+func NewReservationHandler(client *clients.ReservationClient, logger *logrus.Logger) *ReservationHandler {
 	return &ReservationHandler{
-		config:  cfg,
-		logger:  logger,
-		metrics: metrics,
-		client:  client,
+		client: client,
+		logger: logger,
 	}
 }
 
-// SetTracing sets the tracing middleware on the client
-func (h *ReservationHandler) SetTracing(tracing *middleware.TracingMiddleware) {
-	h.client.SetTracing(tracing)
-}
-
-// CreateReservation handles reservation creation
-func (h *ReservationHandler) CreateReservation(c *fiber.Ctx) error {
-	start := time.Now()
-	defer func() {
-		h.metrics.RecordHTTPRequest(c.Method(), c.Path(), c.Response().StatusCode(), time.Since(start))
-	}()
-
-	userID := c.Locals("user_id")
-	if userID == nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "UNAUTHENTICATED",
-				"message": "User not authenticated",
-			},
-		})
-	}
-
-	// Parse request
-	var req struct {
-		EventID    string `json:"event_id" validate:"required"`
-		SeatIDs    []string `json:"seat_ids" validate:"required"`
-		Quantity   int    `json:"quantity,omitempty"`
-		TotalPrice float64 `json:"total_price,omitempty"`
-	}
-
+// Create handles reservation creation
+// @Summary Create a new reservation
+// @Description Create a new ticket reservation for an event
+// @Tags Reservations
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param Idempotency-Key header string true "Idempotency key (UUID v4)"
+// @Param request body clients.CreateReservationRequest true "Reservation request"
+// @Success 201 {object} clients.ReservationResponse
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 409 {object} map[string]interface{} "Conflict"
+// @Failure 500 {object} map[string]interface{} "Internal error"
+// @Router /reservations [post]
+func (r *ReservationHandler) Create(c *fiber.Ctx) error {
+	var req clients.CreateReservationRequest
 	if err := c.BodyParser(&req); err != nil {
-		h.logger.WarnWithContext(c.Context(), "Failed to parse reservation request", "error", err.Error())
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "BAD_REQUEST",
-				"message": "Invalid request body",
-			},
-		})
+		return r.badRequestError(c, "INVALID_REQUEST", "Invalid request body")
 	}
 
-	if req.EventID == "" || len(req.SeatIDs) == 0 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "BAD_REQUEST",
-				"message": "event_id and seat_ids are required",
-			},
-		})
+	// Validate required fields
+	if req.EventID == "" {
+		return r.badRequestError(c, "MISSING_EVENT_ID", "event_id is required")
 	}
 
-	requestBody := map[string]interface{}{
-		"user_id":     userID,
-		"event_id":    req.EventID,
-		"seat_ids":    req.SeatIDs,
-		"quantity":    req.Quantity,
-		"total_price": req.TotalPrice,
+	if len(req.SeatIDs) == 0 && req.Quantity <= 0 {
+		return r.badRequestError(c, "MISSING_SEATS", "Either seat_ids or quantity must be provided")
 	}
 
-	h.logger.InfoWithContext(c.Context(), "Creating reservation",
-		"user_id", userID, "event_id", req.EventID, "seats", len(req.SeatIDs))
+	// Get user ID from auth context
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		return r.unauthorizedError(c, "MISSING_USER", "User authentication required")
+	}
+	req.UserID = userID
 
-	// Forward to reservation service
-	response, err := h.client.CreateReservation(c.Context(), requestBody)
+	// Prepare headers for backend call
+	headers := r.prepareHeaders(c)
+
+	// Call reservation API
+	reservation, err := r.client.CreateReservation(c.Context(), &req, headers)
 	if err != nil {
-		h.logger.ErrorWithContext(c.Context(), "Failed to create reservation", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "INTERNAL_ERROR",
-				"message": "Failed to create reservation",
-			},
-		})
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"event_id": req.EventID,
+			"user_id":  req.UserID,
+			"quantity": req.Quantity,
+		}).Error("Failed to create reservation")
+
+		return r.handleClientError(c, err, "create reservation")
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(response)
+	r.logger.WithFields(logrus.Fields{
+		"reservation_id": reservation.ReservationID,
+		"event_id":       req.EventID,
+		"user_id":        req.UserID,
+		"status":         reservation.Status,
+	}).Info("Reservation created successfully")
+
+	return c.Status(fiber.StatusCreated).JSON(reservation)
 }
 
-// GetReservation handles reservation retrieval
-func (h *ReservationHandler) GetReservation(c *fiber.Ctx) error {
-	start := time.Now()
-	defer func() {
-		h.metrics.RecordHTTPRequest(c.Method(), c.Path(), c.Response().StatusCode(), time.Since(start))
-	}()
-
+// Get handles reservation retrieval
+// @Summary Get reservation details
+// @Description Retrieve details of a specific reservation
+// @Tags Reservations
+// @Produce json
+// @Security Bearer
+// @Param id path string true "Reservation ID"
+// @Success 200 {object} clients.ReservationResponse
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Forbidden"
+// @Failure 404 {object} map[string]interface{} "Not found"
+// @Failure 500 {object} map[string]interface{} "Internal error"
+// @Router /reservations/{id} [get]
+func (r *ReservationHandler) Get(c *fiber.Ctx) error {
 	reservationID := c.Params("id")
 	if reservationID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "BAD_REQUEST",
-				"message": "Reservation ID is required",
-			},
-		})
+		return r.badRequestError(c, "MISSING_ID", "Reservation ID is required")
 	}
 
-	userID := c.Locals("user_id")
+	// Prepare headers for backend call
+	headers := r.prepareHeaders(c)
 
-	h.logger.InfoWithContext(c.Context(), "Getting reservation",
-		"reservation_id", reservationID, "user_id", userID)
-
-	response, err := h.client.GetReservation(c.Context(), reservationID)
+	// Call reservation API
+	reservation, err := r.client.GetReservation(c.Context(), reservationID, headers)
 	if err != nil {
-		h.logger.ErrorWithContext(c.Context(), "Failed to get reservation", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "INTERNAL_ERROR",
-				"message": "Failed to get reservation",
-			},
-		})
+		r.logger.WithError(err).WithField("reservation_id", reservationID).Error("Failed to get reservation")
+		return r.handleClientError(c, err, "get reservation")
 	}
 
-	return c.Status(fiber.StatusOK).JSON(response)
+	// Check if user owns this reservation (if user context available)
+	userID := middleware.GetUserID(c)
+	if userID != "" && reservation.UserID != userID {
+		return r.forbiddenError(c, "ACCESS_DENIED", "You can only access your own reservations")
+	}
+
+	return c.JSON(reservation)
 }
 
-// ListReservations handles reservation listing
-func (h *ReservationHandler) ListReservations(c *fiber.Ctx) error {
-	start := time.Now()
-	defer func() {
-		h.metrics.RecordHTTPRequest(c.Method(), c.Path(), c.Response().StatusCode(), time.Since(start))
-	}()
-
-	userID := c.Locals("user_id")
-
-	// Parse query parameters
-	params := make(map[string]string)
-	if limit := c.Query("limit"); limit != "" {
-		params["limit"] = limit
-	}
-	if offset := c.Query("offset"); offset != "" {
-		params["offset"] = offset
-	}
-	if status := c.Query("status"); status != "" {
-		params["status"] = status
-	}
-
-	h.logger.InfoWithContext(c.Context(), "Listing reservations", "user_id", userID, "params", params)
-
-	response, err := h.client.ListReservations(c.Context(), params)
-	if err != nil {
-		h.logger.ErrorWithContext(c.Context(), "Failed to list reservations", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "INTERNAL_ERROR",
-				"message": "Failed to list reservations",
-			},
-		})
-	}
-
-	return c.Status(fiber.StatusOK).JSON(response)
-}
-
-// CancelReservation handles reservation cancellation
-func (h *ReservationHandler) CancelReservation(c *fiber.Ctx) error {
-	start := time.Now()
-	defer func() {
-		h.metrics.RecordHTTPRequest(c.Method(), c.Path(), c.Response().StatusCode(), time.Since(start))
-	}()
-
+// Confirm handles reservation confirmation
+// @Summary Confirm a reservation
+// @Description Confirm a reservation after payment approval
+// @Tags Reservations
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param Idempotency-Key header string false "Idempotency key (UUID v4)"
+// @Param id path string true "Reservation ID"
+// @Param request body clients.ConfirmReservationRequest false "Confirmation request"
+// @Success 200 {object} clients.ConfirmReservationResponse
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 404 {object} map[string]interface{} "Not found"
+// @Failure 412 {object} map[string]interface{} "Payment not approved"
+// @Failure 500 {object} map[string]interface{} "Internal error"
+// @Router /reservations/{id}/confirm [post]
+func (r *ReservationHandler) Confirm(c *fiber.Ctx) error {
 	reservationID := c.Params("id")
 	if reservationID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "BAD_REQUEST",
-				"message": "Reservation ID is required",
-			},
-		})
+		return r.badRequestError(c, "MISSING_ID", "Reservation ID is required")
 	}
 
-	userID := c.Locals("user_id")
-
-	requestBody := map[string]interface{}{
-		"user_id": userID,
-		"reason":  c.Query("reason", "user_cancelled"),
+	var req clients.ConfirmReservationRequest
+	if err := c.BodyParser(&req); err != nil {
+		// Allow empty body for confirmation
+		req = clients.ConfirmReservationRequest{}
 	}
 
-	h.logger.InfoWithContext(c.Context(), "Cancelling reservation",
-		"reservation_id", reservationID, "user_id", userID)
+	// Prepare headers for backend call
+	headers := r.prepareHeaders(c)
 
-	response, err := h.client.CancelReservation(c.Context(), reservationID, requestBody)
+	// Call reservation API
+	confirmation, err := r.client.ConfirmReservation(c.Context(), reservationID, &req, headers)
 	if err != nil {
-		h.logger.ErrorWithContext(c.Context(), "Failed to cancel reservation", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "INTERNAL_ERROR",
-				"message": "Failed to cancel reservation",
-			},
-		})
+		r.logger.WithError(err).WithField("reservation_id", reservationID).Error("Failed to confirm reservation")
+		return r.handleClientError(c, err, "confirm reservation")
 	}
 
-	return c.Status(fiber.StatusOK).JSON(response)
+	r.logger.WithFields(logrus.Fields{
+		"reservation_id": reservationID,
+		"order_id":       confirmation.OrderID,
+		"status":         confirmation.Status,
+		"user_id":        middleware.GetUserID(c),
+	}).Info("Reservation confirmed successfully")
+
+	return c.JSON(confirmation)
 }
 
-// ConfirmReservation handles reservation confirmation
-func (h *ReservationHandler) ConfirmReservation(c *fiber.Ctx) error {
-	start := time.Now()
-	defer func() {
-		h.metrics.RecordHTTPRequest(c.Method(), c.Path(), c.Response().StatusCode(), time.Since(start))
-	}()
-
+// Cancel handles reservation cancellation
+// @Summary Cancel a reservation
+// @Description Cancel an existing reservation and release the seats
+// @Tags Reservations
+// @Produce json
+// @Security Bearer
+// @Param Idempotency-Key header string false "Idempotency key (UUID v4)"
+// @Param id path string true "Reservation ID"
+// @Success 200 {object} map[string]interface{} "Success"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 404 {object} map[string]interface{} "Not found"
+// @Failure 500 {object} map[string]interface{} "Internal error"
+// @Router /reservations/{id}/cancel [post]
+func (r *ReservationHandler) Cancel(c *fiber.Ctx) error {
 	reservationID := c.Params("id")
 	if reservationID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "BAD_REQUEST",
-				"message": "Reservation ID is required",
-			},
-		})
+		return r.badRequestError(c, "MISSING_ID", "Reservation ID is required")
 	}
 
-	userID := c.Locals("user_id")
+	// Prepare headers for backend call
+	headers := r.prepareHeaders(c)
 
-	requestBody := map[string]interface{}{
-		"user_id": userID,
+	// Call reservation API
+	if err := r.client.CancelReservation(c.Context(), reservationID, headers); err != nil {
+		r.logger.WithError(err).WithField("reservation_id", reservationID).Error("Failed to cancel reservation")
+		return r.handleClientError(c, err, "cancel reservation")
 	}
 
-	h.logger.InfoWithContext(c.Context(), "Confirming reservation",
-		"reservation_id", reservationID, "user_id", userID)
+	r.logger.WithFields(logrus.Fields{
+		"reservation_id": reservationID,
+		"user_id":        middleware.GetUserID(c),
+	}).Info("Reservation cancelled successfully")
 
-	response, err := h.client.ConfirmReservation(c.Context(), reservationID, requestBody)
-	if err != nil {
-		h.logger.ErrorWithContext(c.Context(), "Failed to confirm reservation", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "INTERNAL_ERROR",
-				"message": "Failed to confirm reservation",
-			},
-		})
+	return c.JSON(fiber.Map{
+		"status": "CANCELLED",
+	})
+}
+
+// prepareHeaders prepares headers for backend API calls
+func (r *ReservationHandler) prepareHeaders(c *fiber.Ctx) map[string]string {
+	headers := make(map[string]string)
+
+	// Forward authorization header
+	if auth := c.Get("Authorization"); auth != "" {
+		headers["Authorization"] = auth
 	}
 
-	return c.Status(fiber.StatusOK).JSON(response)
+	// Forward request ID for tracing
+	if requestID := c.Get("X-Request-ID"); requestID != "" {
+		headers["X-Request-ID"] = requestID
+	}
+
+	// Forward idempotency key
+	if idempotencyKey := c.Get("Idempotency-Key"); idempotencyKey != "" {
+		headers["Idempotency-Key"] = idempotencyKey
+	}
+
+	// Forward user agent
+	if userAgent := c.Get("User-Agent"); userAgent != "" {
+		headers["User-Agent"] = userAgent
+	}
+
+	// Add tracing headers if available
+	if traceParent := c.Get("traceparent"); traceParent != "" {
+		headers["traceparent"] = traceParent
+	}
+
+	return headers
+}
+
+// handleClientError handles errors from backend client calls
+func (r *ReservationHandler) handleClientError(c *fiber.Ctx, err error, operation string) error {
+	// Map common client errors to appropriate HTTP status codes
+	errorMsg := err.Error()
+
+	// Check for specific error patterns
+	switch {
+	case contains(errorMsg, "404") || contains(errorMsg, "not found"):
+		return r.notFoundError(c, "RESERVATION_NOT_FOUND", "Reservation not found")
+	case contains(errorMsg, "409") || contains(errorMsg, "conflict"):
+		return r.conflictError(c, "RESERVATION_CONFLICT", "Reservation conflict")
+	case contains(errorMsg, "400") || contains(errorMsg, "bad request"):
+		return r.badRequestError(c, "INVALID_RESERVATION", "Invalid reservation request")
+	case contains(errorMsg, "412") || contains(errorMsg, "payment not approved"):
+		return r.preconditionError(c, "PAYMENT_NOT_APPROVED", "Payment approval required before confirmation")
+	case contains(errorMsg, "timeout"):
+		return r.gatewayTimeoutError(c, "UPSTREAM_TIMEOUT", "Backend service timeout")
+	default:
+		return r.internalError(c, "RESERVATION_ERROR", "Failed to "+operation)
+	}
+}
+
+// Error response helpers
+func (r *ReservationHandler) badRequestError(c *fiber.Ctx, code, message string) error {
+	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     code,
+			"message":  message,
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
+}
+
+func (r *ReservationHandler) unauthorizedError(c *fiber.Ctx, code, message string) error {
+	return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     code,
+			"message":  message,
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
+}
+
+func (r *ReservationHandler) forbiddenError(c *fiber.Ctx, code, message string) error {
+	return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     code,
+			"message":  message,
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
+}
+
+func (r *ReservationHandler) notFoundError(c *fiber.Ctx, code, message string) error {
+	return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     code,
+			"message":  message,
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
+}
+
+func (r *ReservationHandler) conflictError(c *fiber.Ctx, code, message string) error {
+	return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     code,
+			"message":  message,
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
+}
+
+func (r *ReservationHandler) preconditionError(c *fiber.Ctx, code, message string) error {
+	return c.Status(fiber.StatusPreconditionFailed).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     code,
+			"message":  message,
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
+}
+
+func (r *ReservationHandler) gatewayTimeoutError(c *fiber.Ctx, code, message string) error {
+	return c.Status(fiber.StatusGatewayTimeout).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     code,
+			"message":  message,
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
+}
+
+func (r *ReservationHandler) internalError(c *fiber.Ctx, code, message string) error {
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":     code,
+			"message":  message,
+			"trace_id": c.Get("X-Request-ID"),
+		},
+	})
+}
+
+// Helper function to check if string contains substring
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
+		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
+		 len(s) > len(substr) && s[1:len(substr)+1] == substr))
 }

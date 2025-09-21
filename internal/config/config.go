@@ -4,194 +4,141 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/traffic-tacos/gateway-api/pkg/errors"
+	"github.com/kelseyhightower/envconfig"
 )
 
-// Config holds all configuration for the gateway
 type Config struct {
-	Server   ServerConfig   `json:"server"`
-	Upstream UpstreamConfig `json:"upstream"`
-	JWT      JWTConfig      `json:"jwt"`
-	Redis    RedisConfig    `json:"redis"`
-	RateLimit RateLimitConfig `json:"rate_limit"`
-	Idempotency IdempotencyConfig `json:"idempotency"`
-	Observability ObservabilityConfig `json:"observability"`
+	Server      ServerConfig      `envconfig:"SERVER"`
+	Redis       RedisConfig       `envconfig:"REDIS"`
+	JWT         JWTConfig         `envconfig:"JWT"`
+	Backend     BackendConfig     `envconfig:"BACKEND"`
+	RateLimit   RateLimitConfig   `envconfig:"RATE_LIMIT"`
+	Observability ObservabilityConfig `envconfig:"OBSERVABILITY"`
+	CORS        CORSConfig        `envconfig:"CORS"`
+	Log         LogConfig         `envconfig:"LOG"`
+	AWS         AWSConfig         `envconfig:"AWS"`
 }
 
-// ServerConfig holds server-related configuration
+type AWSConfig struct {
+	Region     string `envconfig:"REGION" default:"ap-northeast-2"`
+	Profile    string `envconfig:"PROFILE" default:""`
+	SecretName string `envconfig:"SECRET_NAME" default:""`
+}
+
 type ServerConfig struct {
-	Port         int           `json:"port"`
-	ReadTimeout  time.Duration `json:"read_timeout"`
-	WriteTimeout time.Duration `json:"write_timeout"`
-	IdleTimeout  time.Duration `json:"idle_timeout"`
-	MaxBodySize  int           `json:"max_body_size"` // in bytes
+	Port         string        `envconfig:"PORT" default:"8000"`
+	Environment  string        `envconfig:"ENVIRONMENT" default:"development"`
+	ReadTimeout  time.Duration `envconfig:"READ_TIMEOUT" default:"30s"`
+	WriteTimeout time.Duration `envconfig:"WRITE_TIMEOUT" default:"30s"`
+	IdleTimeout  time.Duration `envconfig:"IDLE_TIMEOUT" default:"120s"`
 }
 
-// UpstreamConfig holds upstream service configurations
-type UpstreamConfig struct {
-	Reservation ReservationConfig `json:"reservation"`
-	Payment     PaymentConfig     `json:"payment"`
-}
-
-// ReservationConfig holds reservation-api configuration
-type ReservationConfig struct {
-	BaseURL string        `json:"base_url"`
-	Timeout time.Duration `json:"timeout"`
-}
-
-// PaymentConfig holds payment-sim-api configuration
-type PaymentConfig struct {
-	BaseURL string        `json:"base_url"`
-	Timeout time.Duration `json:"timeout"`
-}
-
-// JWTConfig holds JWT-related configuration
-type JWTConfig struct {
-	Issuer      string        `json:"issuer"`
-	Audience    string        `json:"audience"`
-	JWKSURL     string        `json:"jwks_url"`
-	CacheTTL    time.Duration `json:"cache_ttl"`
-	SkipVerify  bool          `json:"skip_verify"` // for development
-}
-
-// RedisConfig holds Redis configuration
 type RedisConfig struct {
-	Addr     string `json:"addr"`
-	Password string `json:"password"`
-	DB       int    `json:"db"`
-	TLS      bool   `json:"tls"`
+	Address              string        `envconfig:"ADDRESS" default:"localhost:6379"`
+	Password             string        `envconfig:"PASSWORD" default:""`
+	Database             int           `envconfig:"DATABASE" default:"0"`
+	MaxRetries           int           `envconfig:"MAX_RETRIES" default:"3"`
+	PoolSize             int           `envconfig:"POOL_SIZE" default:"100"`
+	PoolTimeout          time.Duration `envconfig:"POOL_TIMEOUT" default:"4s"`
+	TLSEnabled           bool          `envconfig:"TLS_ENABLED" default:"false"`
+	PasswordFromSecrets  bool          `envconfig:"PASSWORD_FROM_SECRETS" default:"false"`
 }
 
-// RateLimitConfig holds rate limiting configuration
+type JWTConfig struct {
+	JWKSEndpoint string        `envconfig:"JWKS_ENDPOINT" required:"true"`
+	CacheTTL     time.Duration `envconfig:"CACHE_TTL" default:"10m"`
+	Issuer       string        `envconfig:"ISSUER" required:"true"`
+	Audience     string        `envconfig:"AUDIENCE" required:"true"`
+}
+
+type BackendConfig struct {
+	ReservationAPI ReservationAPIConfig `envconfig:"RESERVATION_API"`
+	PaymentAPI     PaymentAPIConfig     `envconfig:"PAYMENT_API"`
+}
+
+type ReservationAPIConfig struct {
+	BaseURL string        `envconfig:"BASE_URL" default:"http://reservation-api.tickets-api.svc.cluster.local:8080"`
+	Timeout time.Duration `envconfig:"TIMEOUT" default:"600ms"`
+}
+
+type PaymentAPIConfig struct {
+	BaseURL string        `envconfig:"BASE_URL" default:"http://payment-sim-api.tickets-api.svc.cluster.local:8080"`
+	Timeout time.Duration `envconfig:"TIMEOUT" default:"400ms"`
+}
+
 type RateLimitConfig struct {
-	RPS   int `json:"rps"`
-	Burst int `json:"burst"`
+	RPS           int           `envconfig:"RPS" default:"50"`
+	Burst         int           `envconfig:"BURST" default:"100"`
+	WindowSize    time.Duration `envconfig:"WINDOW_SIZE" default:"1s"`
+	Enabled       bool          `envconfig:"ENABLED" default:"true"`
+	ExemptPaths   []string      `envconfig:"EXEMPT_PATHS" default:"/healthz,/readyz,/metrics"`
 }
 
-// IdempotencyConfig holds idempotency configuration
-type IdempotencyConfig struct {
-	TTLSeconds int `json:"ttl_seconds"`
-}
-
-// ObservabilityConfig holds observability configuration
 type ObservabilityConfig struct {
-	ServiceName    string `json:"service_name"`
-	ServiceVersion string `json:"service_version"`
-	OTLPEndpoint   string `json:"otlp_endpoint"`
-	TraceSampling  float64 `json:"trace_sampling"`
+	MetricsPath   string `envconfig:"METRICS_PATH" default:"/metrics"`
+	OTLPEndpoint  string `envconfig:"OTLP_ENDPOINT" default:"http://localhost:4318"`
+	TracingEnabled bool   `envconfig:"TRACING_ENABLED" default:"true"`
+	SampleRate    float64 `envconfig:"SAMPLE_RATE" default:"0.1"`
 }
 
-// Load loads configuration from environment variables
+type CORSConfig struct {
+	AllowOrigins string `envconfig:"ALLOW_ORIGINS" default:"*"`
+}
+
+type LogConfig struct {
+	Level  string `envconfig:"LEVEL" default:"info"`
+	Format string `envconfig:"FORMAT" default:"json"`
+}
+
 func Load() (*Config, error) {
-	cfg := &Config{}
+	var cfg Config
 
-	// Server config
-	cfg.Server.Port = getEnvAsInt("PORT", 8080)
-	cfg.Server.ReadTimeout = getEnvAsDuration("SERVER_READ_TIMEOUT", 30*time.Second)
-	cfg.Server.WriteTimeout = getEnvAsDuration("SERVER_WRITE_TIMEOUT", 30*time.Second)
-	cfg.Server.IdleTimeout = getEnvAsDuration("SERVER_IDLE_TIMEOUT", 120*time.Second)
-	cfg.Server.MaxBodySize = getEnvAsInt("MAX_BODY_SIZE", 1024*1024) // 1MB
+	// Load from environment variables
+	if err := envconfig.Process("", &cfg); err != nil {
+		return nil, fmt.Errorf("failed to process environment config: %w", err)
+	}
 
-	// Upstream config
-	cfg.Upstream.Reservation.BaseURL = getEnv("UPSTREAM_RESERVATION_BASE", "http://reservation-api.tickets-api.svc.cluster.local:8080")
-	cfg.Upstream.Reservation.Timeout = getEnvAsDuration("UPSTREAM_RESERVATION_TIMEOUT", 600*time.Millisecond)
-	cfg.Upstream.Payment.BaseURL = getEnv("UPSTREAM_PAYMENT_BASE", "http://payment-sim-api.tickets-api.svc.cluster.local:8080")
-	cfg.Upstream.Payment.Timeout = getEnvAsDuration("UPSTREAM_PAYMENT_TIMEOUT", 400*time.Millisecond)
-
-	// JWT config
-	cfg.JWT.Issuer = getEnv("JWT_ISSUER", "")
-	cfg.JWT.Audience = getEnv("JWT_AUDIENCE", "")
-	cfg.JWT.JWKSURL = getEnv("JWT_JWKS_URL", "")
-	cfg.JWT.CacheTTL = getEnvAsDuration("JWT_CACHE_TTL", 10*time.Minute)
-	cfg.JWT.SkipVerify = getEnvAsBool("JWT_SKIP_VERIFY", false)
-
-	// Redis config
-	cfg.Redis.Addr = getEnv("REDIS_ADDR", "redis:6379")
-	cfg.Redis.Password = getEnv("REDIS_PASSWORD", "")
-	cfg.Redis.DB = getEnvAsInt("REDIS_DB", 0)
-	cfg.Redis.TLS = getEnvAsBool("REDIS_TLS", true)
-
-	// Rate limit config
-	cfg.RateLimit.RPS = getEnvAsInt("RATE_LIMIT_RPS", 50)
-	cfg.RateLimit.Burst = getEnvAsInt("RATE_LIMIT_BURST", 100)
-
-	// Idempotency config
-	cfg.Idempotency.TTLSeconds = getEnvAsInt("IDEMPOTENCY_TTL_SECONDS", 300)
-
-	// Observability config
-	cfg.Observability.ServiceName = getEnv("SERVICE_NAME", "gateway-api")
-	cfg.Observability.ServiceVersion = getEnv("SERVICE_VERSION", "1.0.0")
-	cfg.Observability.OTLPEndpoint = getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317")
-	cfg.Observability.TraceSampling = getEnvAsFloat("TRACE_SAMPLING", 0.1) // 10%
+	// Additional processing for slice fields that envconfig doesn't handle well
+	if exemptPaths := os.Getenv("RATE_LIMIT_EXEMPT_PATHS"); exemptPaths != "" {
+		cfg.RateLimit.ExemptPaths = strings.Split(exemptPaths, ",")
+		for i := range cfg.RateLimit.ExemptPaths {
+			cfg.RateLimit.ExemptPaths[i] = strings.TrimSpace(cfg.RateLimit.ExemptPaths[i])
+		}
+	}
 
 	// Validate required fields
-	if err := cfg.Validate(); err != nil {
-		return nil, err
+	if err := validateConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
-	return cfg, nil
+	return &cfg, nil
 }
 
-// Validate validates the configuration
-func (c *Config) Validate() error {
-	if c.JWT.Issuer == "" {
-		return errors.NewAppError(errors.CodeBadRequest, "JWT_ISSUER is required", nil)
+func validateConfig(cfg *Config) error {
+	if cfg.JWT.JWKSEndpoint == "" {
+		return fmt.Errorf("JWT_JWKS_ENDPOINT is required")
 	}
-	if c.JWT.Audience == "" {
-		return errors.NewAppError(errors.CodeBadRequest, "JWT_AUDIENCE is required", nil)
+
+	if cfg.JWT.Issuer == "" {
+		return fmt.Errorf("JWT_ISSUER is required")
 	}
-	if c.JWT.JWKSURL == "" {
-		return errors.NewAppError(errors.CodeBadRequest, "JWT_JWKS_URL is required", nil)
+
+	if cfg.JWT.Audience == "" {
+		return fmt.Errorf("JWT_AUDIENCE is required")
 	}
-	if c.Server.Port < 1 || c.Server.Port > 65535 {
-		return errors.NewAppError(errors.CodeBadRequest, "PORT must be between 1 and 65535", nil)
+
+	// Validate port
+	if port, err := strconv.Atoi(cfg.Server.Port); err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("invalid server port: %s", cfg.Server.Port)
 	}
+
+	// Validate sample rate
+	if cfg.Observability.SampleRate < 0 || cfg.Observability.SampleRate > 1 {
+		return fmt.Errorf("invalid tracing sample rate: %f", cfg.Observability.SampleRate)
+	}
+
 	return nil
-}
-
-// Helper functions for environment variable parsing
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-func getEnvAsInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
-		}
-	}
-	return defaultValue
-}
-
-func getEnvAsBool(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
-		if boolValue, err := strconv.ParseBool(value); err == nil {
-			return boolValue
-		}
-	}
-	return defaultValue
-}
-
-func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
-	if value := os.Getenv(key); value != "" {
-		if duration, err := time.ParseDuration(value); err == nil {
-			return duration
-		}
-	}
-	return defaultValue
-}
-
-func getEnvAsFloat(key string, defaultValue float64) float64 {
-	if value := os.Getenv(key); value != "" {
-		if floatValue, err := strconv.ParseFloat(value, 64); err == nil {
-			return floatValue
-		}
-	}
-	return defaultValue
 }
