@@ -3,6 +3,7 @@ package routes
 import (
 	"github.com/traffic-tacos/gateway-api/internal/clients"
 	"github.com/traffic-tacos/gateway-api/internal/middleware"
+	"github.com/traffic-tacos/gateway-api/internal/utils"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/sirupsen/logrus"
@@ -59,7 +60,7 @@ func (p *PaymentHandler) CreateIntent(c *fiber.Ctx) error {
 
 	// Validate scenario
 	validScenarios := []string{"approve", "fail", "delay", "random"}
-	if !contains(validScenarios, req.Scenario) {
+	if !utils.ContainsString(validScenarios, req.Scenario) {
 		return p.badRequestError(c, "INVALID_SCENARIO", "scenario must be one of: approve, fail, delay, random")
 	}
 
@@ -157,7 +158,7 @@ func (p *PaymentHandler) ProcessPayment(c *fiber.Ctx) error {
 
 	// Validate action
 	validActions := []string{"approve", "fail"}
-	if !contains(validActions, req.Action) {
+	if !utils.ContainsString(validActions, req.Action) {
 		return p.badRequestError(c, "INVALID_ACTION", "action must be either 'approve' or 'fail'")
 	}
 
@@ -227,15 +228,15 @@ func (p *PaymentHandler) handleClientError(c *fiber.Ctx, err error, operation st
 
 	// Check for specific error patterns
 	switch {
-	case contains(errorMsg, "404") || contains(errorMsg, "not found"):
+	case utils.ContainsSubstring(errorMsg, "404") || utils.ContainsSubstring(errorMsg, "not found"):
 		return p.notFoundError(c, "PAYMENT_NOT_FOUND", "Payment intent not found")
-	case contains(errorMsg, "409") || contains(errorMsg, "conflict"):
+	case utils.ContainsSubstring(errorMsg, "409") || utils.ContainsSubstring(errorMsg, "conflict"):
 		return p.conflictError(c, "PAYMENT_CONFLICT", "Payment conflict")
-	case contains(errorMsg, "400") || contains(errorMsg, "bad request"):
+	case utils.ContainsSubstring(errorMsg, "400") || utils.ContainsSubstring(errorMsg, "bad request"):
 		return p.badRequestError(c, "INVALID_PAYMENT", "Invalid payment request")
-	case contains(errorMsg, "402") || contains(errorMsg, "payment required"):
+	case utils.ContainsSubstring(errorMsg, "402") || utils.ContainsSubstring(errorMsg, "payment required"):
 		return p.paymentRequiredError(c, "PAYMENT_REQUIRED", "Payment required")
-	case contains(errorMsg, "timeout"):
+	case utils.ContainsSubstring(errorMsg, "timeout"):
 		return p.gatewayTimeoutError(c, "UPSTREAM_TIMEOUT", "Payment service timeout")
 	default:
 		return p.internalError(c, "PAYMENT_ERROR", "Failed to "+operation)
@@ -303,12 +304,3 @@ func (p *PaymentHandler) internalError(c *fiber.Ctx, code, message string) error
 	})
 }
 
-// Helper function to check if slice contains string
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}

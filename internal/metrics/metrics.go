@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/adaptor"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -170,9 +170,5 @@ func RecordRedisOperation(operation, status string, duration time.Duration) {
 
 // PrometheusHandler returns the Prometheus metrics handler
 func PrometheusHandler() fiber.Handler {
-	promHandler := promhttp.Handler()
-	return func(c *fiber.Ctx) error {
-		promHandler.ServeHTTP(c.Response(), c.Request())
-		return nil
-	}
+	return adaptor.HTTPHandler(promhttp.Handler())
 }

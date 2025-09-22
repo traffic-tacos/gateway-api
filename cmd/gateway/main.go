@@ -58,7 +58,7 @@ func main() {
 	}
 
 	// Initialize tracing
-	tracingShutdown, err := setupTracing(cfg)
+	tracingShutdown, err := setupTracing(cfg, logger)
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to setup tracing")
 	}
@@ -95,13 +95,7 @@ func main() {
 	// Global middleware
 	app.Use(recover.New())
 	app.Use(requestid.New())
-	app.Use(helmet.New(helmet.Config{
-		ContentTypeNosniff: true,
-		XSSProtection:      true,
-		ReferrerPolicy:     "strict-origin-when-cross-origin",
-		HSTSMaxAge:         31536000,
-		ContentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:",
-	}))
+	app.Use(helmet.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.CORS.AllowOrigins,
 		AllowMethods:     "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
@@ -136,7 +130,7 @@ func main() {
 	}
 }
 
-func setupTracing(cfg *config.Config) (func(), error) {
+func setupTracing(cfg *config.Config, logger *logrus.Logger) (func(), error) {
 	shutdown, err := middleware.InitTracing(&cfg.Observability, logger)
 	if err != nil {
 		return nil, err

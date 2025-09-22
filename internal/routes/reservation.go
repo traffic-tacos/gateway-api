@@ -3,6 +3,7 @@ package routes
 import (
 	"github.com/traffic-tacos/gateway-api/internal/clients"
 	"github.com/traffic-tacos/gateway-api/internal/middleware"
+	"github.com/traffic-tacos/gateway-api/internal/utils"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/sirupsen/logrus"
@@ -248,15 +249,15 @@ func (r *ReservationHandler) handleClientError(c *fiber.Ctx, err error, operatio
 
 	// Check for specific error patterns
 	switch {
-	case contains(errorMsg, "404") || contains(errorMsg, "not found"):
+	case utils.ContainsSubstring(errorMsg, "404") || utils.ContainsSubstring(errorMsg, "not found"):
 		return r.notFoundError(c, "RESERVATION_NOT_FOUND", "Reservation not found")
-	case contains(errorMsg, "409") || contains(errorMsg, "conflict"):
+	case utils.ContainsSubstring(errorMsg, "409") || utils.ContainsSubstring(errorMsg, "conflict"):
 		return r.conflictError(c, "RESERVATION_CONFLICT", "Reservation conflict")
-	case contains(errorMsg, "400") || contains(errorMsg, "bad request"):
+	case utils.ContainsSubstring(errorMsg, "400") || utils.ContainsSubstring(errorMsg, "bad request"):
 		return r.badRequestError(c, "INVALID_RESERVATION", "Invalid reservation request")
-	case contains(errorMsg, "412") || contains(errorMsg, "payment not approved"):
+	case utils.ContainsSubstring(errorMsg, "412") || utils.ContainsSubstring(errorMsg, "payment not approved"):
 		return r.preconditionError(c, "PAYMENT_NOT_APPROVED", "Payment approval required before confirmation")
-	case contains(errorMsg, "timeout"):
+	case utils.ContainsSubstring(errorMsg, "timeout"):
 		return r.gatewayTimeoutError(c, "UPSTREAM_TIMEOUT", "Backend service timeout")
 	default:
 		return r.internalError(c, "RESERVATION_ERROR", "Failed to "+operation)
@@ -344,9 +345,3 @@ func (r *ReservationHandler) internalError(c *fiber.Ctx, code, message string) e
 	})
 }
 
-// Helper function to check if string contains substring
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
-		 len(s) > len(substr) && s[1:len(substr)+1] == substr))
-}

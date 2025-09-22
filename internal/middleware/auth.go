@@ -11,7 +11,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/lestrrat-go/jwx/v2/jwk"
-	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 )
@@ -44,7 +43,7 @@ func NewAuthMiddleware(cfg *config.JWTConfig, redisClient *redis.Client, logger 
 		config:      cfg,
 		redisClient: redisClient,
 		logger:      logger,
-		jwkCache:    cache,
+		jwkCache:    *cache,
 	}, nil
 }
 
