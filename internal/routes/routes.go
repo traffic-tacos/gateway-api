@@ -15,9 +15,16 @@ import (
 
 // Setup configures all API routes
 func Setup(app *fiber.App, cfg *config.Config, logger *logrus.Logger, middlewareManager *middleware.Manager) {
-	// Initialize clients
-	reservationClient := clients.NewReservationClient(&cfg.Backend.ReservationAPI, logger)
-	paymentClient := clients.NewPaymentClient(&cfg.Backend.PaymentAPI, logger)
+	// Initialize gRPC clients
+	reservationClient, err := clients.NewReservationClient(&cfg.Backend.ReservationAPI, logger)
+	if err != nil {
+		logger.WithError(err).Fatal("Failed to create reservation client")
+	}
+
+	paymentClient, err := clients.NewPaymentClient(&cfg.Backend.PaymentAPI, logger)
+	if err != nil {
+		logger.WithError(err).Fatal("Failed to create payment client")
+	}
 
 	// Create route handlers
 	queueHandler := NewQueueHandler(middlewareManager.RedisClient, logger)

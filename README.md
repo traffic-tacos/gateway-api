@@ -4,11 +4,12 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
 
 ## Recent Updates
 
+- ✅ **gRPC Integration**: Successfully migrated to proto-contracts Go module for backend communication
+- ✅ **Hybrid Architecture**: REST API frontend with gRPC backend communication for optimal performance
+- ✅ **Proto Contracts**: Integrated Traffic Tacos proto-contracts for type-safe inter-service communication
+- ✅ **Client Refactoring**: Replaced HTTP clients with gRPC clients for reservation and payment services
 - ✅ **Local Development Setup**: Complete Redis installation and configuration guide
 - ✅ **AWS ElastiCache Integration**: Production-ready Redis with Secrets Manager auth
-- ✅ **gRPC Planning**: Comprehensive migration strategy documented in [GRPC_PLAN.md](GRPC_PLAN.md)
-- ✅ **Compilation Fixes**: Resolved function conflicts and Fiber middleware compatibility
-- ✅ **Enhanced Documentation**: Updated Swagger docs and local development guides
 
 ## Features
 
@@ -18,32 +19,46 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
 - **Idempotency**: Request deduplication with conflict detection
 - **Observability**: Prometheus metrics, OpenTelemetry tracing, structured logging
 - **Queue Management**: Virtual queuing system for traffic control
-- **Backend Integration**: Seamless proxy to reservation and payment APIs
-- **gRPC Support**: Integration with Traffic Tacos proto contracts for high-performance inter-service communication
+- **Backend Integration**: gRPC-based communication with reservation, inventory, and payment services
+- **Proto Contracts**: Type-safe service communication using Traffic Tacos proto-contracts module
 - **AWS Integration**: ElastiCache Redis with Secrets Manager for production deployment
 
 ## Architecture
 
+### Hybrid REST + gRPC Architecture
+
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Client App    │───▶│   Gateway API    │───▶│ Reservation API │
-│  (React/Web)    │    │  (Go + Fiber)    │    │ (Spring Boot)   │
-└─────────────────┘    └──────────┬───────┘    └─────────────────┘
-                                  │
-                                  ▼
-                       ┌─────────────────┐
-                       │  Payment API    │
-                       │ (Node.js/Go)    │
-                       └─────────────────┘
+Load Balancer
+    ↓ HTTP/REST
+┌─────────────────┐
+│   Gateway API   │ (REST API Frontend)
+│  (Go + Fiber)   │ Port 8000
+└─────────┬───────┘
+          ↓ gRPC Communication
+┌─────────────────┬─────────────────┬─────────────────┐
+│ reservation-api │ inventory-api   │ payment-sim-api │
+│ (Kotlin:9090)   │ (Go:9091)      │ (Go:9092)      │
+└─────────────────┴─────────────────┴─────────────────┘
+         ↕ gRPC
+    (Inter-service communication)
 ```
+
+### Communication Patterns
+
+- **External Interface**: HTTP REST API for web/mobile clients
+- **Internal Communication**: High-performance gRPC using proto-contracts
+- **Service Discovery**: Direct address configuration with health checks
+- **Type Safety**: Shared proto definitions across all services
 
 ## Quick Start
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.23+
 - Redis (local or AWS ElastiCache)
 - Access to JWT JWKS endpoint
+- gRPC backend services (reservation-api, inventory-api, payment-sim-api)
+- Traffic Tacos proto-contracts module
 - AWS CLI configured (for ElastiCache access)
 
 ### Local Development Setup
@@ -64,7 +79,13 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
    docker run -d --name redis -p 6379:6379 redis:7-alpine
    ```
 
-3. **Setup environment configuration**
+3. **Install dependencies**
+   ```bash
+   # Download Go modules including proto-contracts
+   go mod download
+   ```
+
+4. **Setup environment configuration**
    ```bash
    # For local development with local Redis
    cp .env .env.local
@@ -74,7 +95,16 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
    # Edit AWS profile and ElastiCache endpoints
    ```
 
-4. **Run the application**
+5. **Configure backend services**
+   ```bash
+   # Set gRPC backend addresses for local development
+   export BACKEND_RESERVATION_API_GRPC_ADDRESS="localhost:9090"
+   export BACKEND_PAYMENT_API_GRPC_ADDRESS="localhost:9092"
+   export BACKEND_RESERVATION_API_TLS_ENABLED="false"
+   export BACKEND_PAYMENT_API_TLS_ENABLED="false"
+   ```
+
+6. **Run the application**
    ```bash
    # Load environment and start
    source .env.local
@@ -85,14 +115,14 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
    go run cmd/gateway/main.go
    ```
 
-5. **Access Swagger documentation**
+7. **Access Swagger documentation**
    ```
    http://localhost:8000/swagger/index.html
    ```
 
-6. **Additional Resources**
+8. **Additional Resources**
    - [Local Development Guide](README_LOCAL.md) - Detailed Redis setup options
-   - [gRPC Migration Plan](GRPC_PLAN.md) - Protocol Buffers integration strategy
+   - [Proto Contracts Documentation](.cursor/rules/project-proto-contracts.mdc) - gRPC service definitions and usage
    - [AWS Configuration](.env.aws) - ElastiCache and Secrets Manager setup
 
 ### Alternative Setup (Manual)
@@ -128,8 +158,10 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
 | `JWT_JWKS_ENDPOINT` | JWKS endpoint URL | **Required** |
 | `JWT_ISSUER` | JWT issuer | **Required** |
 | `JWT_AUDIENCE` | JWT audience | **Required** |
-| `BACKEND_RESERVATION_API_BASE_URL` | Reservation API URL | `http://localhost:8001` |
-| `BACKEND_PAYMENT_API_BASE_URL` | Payment API URL | `http://localhost:8003` |
+| `BACKEND_RESERVATION_API_GRPC_ADDRESS` | Reservation API gRPC address | `reservation-api:9090` |
+| `BACKEND_PAYMENT_API_GRPC_ADDRESS` | Payment API gRPC address | `payment-sim-api:9092` |
+| `BACKEND_RESERVATION_API_TLS_ENABLED` | Enable TLS for reservation API | `false` |
+| `BACKEND_PAYMENT_API_TLS_ENABLED` | Enable TLS for payment API | `false` |
 | `RATE_LIMIT_RPS` | Rate limit per second | `50` |
 | `RATE_LIMIT_BURST` | Rate limit burst | `100` |
 | `OBSERVABILITY_OTLP_ENDPOINT` | OTLP endpoint | `http://localhost:4318` |

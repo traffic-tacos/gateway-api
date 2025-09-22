@@ -60,13 +60,15 @@ type BackendConfig struct {
 }
 
 type ReservationAPIConfig struct {
-	BaseURL string        `envconfig:"BASE_URL" default:"http://reservation-api.tickets-api.svc.cluster.local:8080"`
-	Timeout time.Duration `envconfig:"TIMEOUT" default:"600ms"`
+	GRPCAddress string        `envconfig:"GRPC_ADDRESS" default:"reservation-api.tickets-api.svc.cluster.local:9090"`
+	Timeout     time.Duration `envconfig:"TIMEOUT" default:"600ms"`
+	TLSEnabled  bool          `envconfig:"TLS_ENABLED" default:"false"`
 }
 
 type PaymentAPIConfig struct {
-	BaseURL string        `envconfig:"BASE_URL" default:"http://payment-sim-api.tickets-api.svc.cluster.local:8080"`
-	Timeout time.Duration `envconfig:"TIMEOUT" default:"400ms"`
+	GRPCAddress string        `envconfig:"GRPC_ADDRESS" default:"payment-sim-api.tickets-api.svc.cluster.local:9090"`
+	Timeout     time.Duration `envconfig:"TIMEOUT" default:"400ms"`
+	TLSEnabled  bool          `envconfig:"TLS_ENABLED" default:"false"`
 }
 
 type RateLimitConfig struct {

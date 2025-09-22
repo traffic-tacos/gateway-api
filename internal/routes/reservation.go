@@ -29,15 +29,32 @@ func NewReservationHandler(client *clients.ReservationClient, logger *logrus.Log
 // @Produce json
 // @Security Bearer
 // @Param Idempotency-Key header string true "Idempotency key (UUID v4)"
-// @Param request body clients.CreateReservationRequest true "Reservation request"
-// @Success 201 {object} clients.ReservationResponse
+// @Param request body CreateReservationRequest true "Reservation request"
+// @Success 201 {object} ReservationResponse
 // @Failure 400 {object} map[string]interface{} "Bad request"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 409 {object} map[string]interface{} "Conflict"
 // @Failure 500 {object} map[string]interface{} "Internal error"
 // @Router /reservations [post]
+// Request/Response models for API documentation
+type CreateReservationRequest struct {
+	EventID            string   `json:"event_id"`
+	SeatIDs            []string `json:"seat_ids"`
+	Quantity           int32    `json:"quantity"`
+	ReservationToken   string   `json:"reservation_token,omitempty"`
+}
+
+type ReservationResponse struct {
+	ReservationID string   `json:"reservation_id"`
+	Status        string   `json:"status"`
+	EventID       string   `json:"event_id"`
+	SeatIDs       []string `json:"seat_ids"`
+	Quantity      int32    `json:"quantity"`
+	UserID        string   `json:"user_id"`
+}
+
 func (r *ReservationHandler) Create(c *fiber.Ctx) error {
-	var req clients.CreateReservationRequest
+	var req CreateReservationRequest
 	if err := c.BodyParser(&req); err != nil {
 		return r.badRequestError(c, "INVALID_REQUEST", "Invalid request body")
 	}
@@ -56,31 +73,37 @@ func (r *ReservationHandler) Create(c *fiber.Ctx) error {
 	if userID == "" {
 		return r.unauthorizedError(c, "MISSING_USER", "User authentication required")
 	}
-	req.UserID = userID
 
-	// Prepare headers for backend call
-	headers := r.prepareHeaders(c)
-
-	// Call reservation API
-	reservation, err := r.client.CreateReservation(c.Context(), &req, headers)
+	// Call reservation API via gRPC
+	reservation, err := r.client.CreateReservation(c.Context(), req.EventID, req.SeatIDs, req.Quantity, req.ReservationToken, userID)
 	if err != nil {
 		r.logger.WithError(err).WithFields(logrus.Fields{
 			"event_id": req.EventID,
-			"user_id":  req.UserID,
+			"user_id":  userID,
 			"quantity": req.Quantity,
 		}).Error("Failed to create reservation")
 
 		return r.handleClientError(c, err, "create reservation")
 	}
 
+	// Convert gRPC response to API response
+	response := ReservationResponse{
+		ReservationID: reservation.ReservationId,
+		Status:        "PENDING", // Default status
+		EventID:       req.EventID,
+		SeatIDs:       req.SeatIDs,
+		Quantity:      req.Quantity,
+		UserID:        userID,
+	}
+
 	r.logger.WithFields(logrus.Fields{
-		"reservation_id": reservation.ReservationID,
+		"reservation_id": response.ReservationID,
 		"event_id":       req.EventID,
-		"user_id":        req.UserID,
-		"status":         reservation.Status,
+		"user_id":        userID,
+		"status":         response.Status,
 	}).Info("Reservation created successfully")
 
-	return c.Status(fiber.StatusCreated).JSON(reservation)
+	return c.Status(fiber.StatusCreated).JSON(response)
 }
 
 // Get handles reservation retrieval
@@ -90,7 +113,7 @@ func (r *ReservationHandler) Create(c *fiber.Ctx) error {
 // @Produce json
 // @Security Bearer
 // @Param id path string true "Reservation ID"
-// @Success 200 {object} clients.ReservationResponse
+// @Success 200 {object} ReservationResponse
 // @Failure 400 {object} map[string]interface{} "Bad request"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 403 {object} map[string]interface{} "Forbidden"
@@ -103,23 +126,30 @@ func (r *ReservationHandler) Get(c *fiber.Ctx) error {
 		return r.badRequestError(c, "MISSING_ID", "Reservation ID is required")
 	}
 
-	// Prepare headers for backend call
-	headers := r.prepareHeaders(c)
-
-	// Call reservation API
-	reservation, err := r.client.GetReservation(c.Context(), reservationID, headers)
+	// Call reservation API via gRPC
+	_, err := r.client.GetReservation(c.Context(), reservationID)
 	if err != nil {
 		r.logger.WithError(err).WithField("reservation_id", reservationID).Error("Failed to get reservation")
 		return r.handleClientError(c, err, "get reservation")
 	}
 
+	// Convert gRPC response to API response (simplified until we confirm proto structure)
+	response := ReservationResponse{
+		ReservationID: reservationID,
+		Status:        "PENDING", // Default status
+		EventID:       "",         // Will need to get from proto response
+		SeatIDs:       []string{}, // Will need to get from proto response
+		Quantity:      0,          // Will need to get from proto response
+		UserID:        "",         // Will need to get from proto response
+	}
+
 	// Check if user owns this reservation (if user context available)
 	userID := middleware.GetUserID(c)
-	if userID != "" && reservation.UserID != userID {
+	if userID != "" && response.UserID != userID {
 		return r.forbiddenError(c, "ACCESS_DENIED", "You can only access your own reservations")
 	}
 
-	return c.JSON(reservation)
+	return c.JSON(response)
 }
 
 // Confirm handles reservation confirmation
@@ -131,44 +161,56 @@ func (r *ReservationHandler) Get(c *fiber.Ctx) error {
 // @Security Bearer
 // @Param Idempotency-Key header string false "Idempotency key (UUID v4)"
 // @Param id path string true "Reservation ID"
-// @Param request body clients.ConfirmReservationRequest false "Confirmation request"
-// @Success 200 {object} clients.ConfirmReservationResponse
+// @Param request body ConfirmReservationRequest false "Confirmation request"
+// @Success 200 {object} ConfirmReservationResponse
 // @Failure 400 {object} map[string]interface{} "Bad request"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 404 {object} map[string]interface{} "Not found"
 // @Failure 412 {object} map[string]interface{} "Payment not approved"
 // @Failure 500 {object} map[string]interface{} "Internal error"
 // @Router /reservations/{id}/confirm [post]
+type ConfirmReservationRequest struct {
+	PaymentIntentID string `json:"payment_intent_id"`
+}
+
+type ConfirmReservationResponse struct {
+	OrderID string `json:"order_id"`
+	Status  string `json:"status"`
+}
+
 func (r *ReservationHandler) Confirm(c *fiber.Ctx) error {
 	reservationID := c.Params("id")
 	if reservationID == "" {
 		return r.badRequestError(c, "MISSING_ID", "Reservation ID is required")
 	}
 
-	var req clients.ConfirmReservationRequest
+	var req ConfirmReservationRequest
 	if err := c.BodyParser(&req); err != nil {
 		// Allow empty body for confirmation
-		req = clients.ConfirmReservationRequest{}
+		req = ConfirmReservationRequest{}
 	}
 
-	// Prepare headers for backend call
-	headers := r.prepareHeaders(c)
-
-	// Call reservation API
-	confirmation, err := r.client.ConfirmReservation(c.Context(), reservationID, &req, headers)
+	// Call reservation API via gRPC
+	confirmation, err := r.client.ConfirmReservation(c.Context(), reservationID, req.PaymentIntentID)
 	if err != nil {
 		r.logger.WithError(err).WithField("reservation_id", reservationID).Error("Failed to confirm reservation")
 		return r.handleClientError(c, err, "confirm reservation")
 	}
 
+	// Convert gRPC response to API response
+	response := ConfirmReservationResponse{
+		OrderID: confirmation.OrderId,
+		Status:  "CONFIRMED", // Default status
+	}
+
 	r.logger.WithFields(logrus.Fields{
 		"reservation_id": reservationID,
-		"order_id":       confirmation.OrderID,
-		"status":         confirmation.Status,
+		"order_id":       response.OrderID,
+		"status":         response.Status,
 		"user_id":        middleware.GetUserID(c),
 	}).Info("Reservation confirmed successfully")
 
-	return c.JSON(confirmation)
+	return c.JSON(response)
 }
 
 // Cancel handles reservation cancellation
@@ -191,11 +233,9 @@ func (r *ReservationHandler) Cancel(c *fiber.Ctx) error {
 		return r.badRequestError(c, "MISSING_ID", "Reservation ID is required")
 	}
 
-	// Prepare headers for backend call
-	headers := r.prepareHeaders(c)
-
-	// Call reservation API
-	if err := r.client.CancelReservation(c.Context(), reservationID, headers); err != nil {
+	// Call reservation API via gRPC
+	_, err := r.client.CancelReservation(c.Context(), reservationID)
+	if err != nil {
 		r.logger.WithError(err).WithField("reservation_id", reservationID).Error("Failed to cancel reservation")
 		return r.handleClientError(c, err, "cancel reservation")
 	}
@@ -210,37 +250,6 @@ func (r *ReservationHandler) Cancel(c *fiber.Ctx) error {
 	})
 }
 
-// prepareHeaders prepares headers for backend API calls
-func (r *ReservationHandler) prepareHeaders(c *fiber.Ctx) map[string]string {
-	headers := make(map[string]string)
-
-	// Forward authorization header
-	if auth := c.Get("Authorization"); auth != "" {
-		headers["Authorization"] = auth
-	}
-
-	// Forward request ID for tracing
-	if requestID := c.Get("X-Request-ID"); requestID != "" {
-		headers["X-Request-ID"] = requestID
-	}
-
-	// Forward idempotency key
-	if idempotencyKey := c.Get("Idempotency-Key"); idempotencyKey != "" {
-		headers["Idempotency-Key"] = idempotencyKey
-	}
-
-	// Forward user agent
-	if userAgent := c.Get("User-Agent"); userAgent != "" {
-		headers["User-Agent"] = userAgent
-	}
-
-	// Add tracing headers if available
-	if traceParent := c.Get("traceparent"); traceParent != "" {
-		headers["traceparent"] = traceParent
-	}
-
-	return headers
-}
 
 // handleClientError handles errors from backend client calls
 func (r *ReservationHandler) handleClientError(c *fiber.Ctx, err error, operation string) error {

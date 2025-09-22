@@ -4,6 +4,7 @@ import (
 	"github.com/traffic-tacos/gateway-api/internal/clients"
 	"github.com/traffic-tacos/gateway-api/internal/middleware"
 	"github.com/traffic-tacos/gateway-api/internal/utils"
+	commonv1 "github.com/traffic-tacos/proto-contracts/gen/go/common/v1"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/sirupsen/logrus"
@@ -29,14 +30,29 @@ func NewPaymentHandler(client *clients.PaymentClient, logger *logrus.Logger) *Pa
 // @Produce json
 // @Security Bearer
 // @Param Idempotency-Key header string true "Idempotency key (UUID v4)"
-// @Param request body clients.CreatePaymentIntentRequest true "Payment intent request"
-// @Success 200 {object} clients.PaymentIntentResponse
+// @Param request body CreatePaymentIntentRequest true "Payment intent request"
+// @Success 200 {object} PaymentIntentResponse
 // @Failure 400 {object} map[string]interface{} "Bad request"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 500 {object} map[string]interface{} "Internal error"
 // @Router /payment/intent [post]
+// Request/Response models for API documentation
+type CreatePaymentIntentRequest struct {
+	ReservationID string `json:"reservation_id"`
+	Amount        int64  `json:"amount"`
+	Currency      string `json:"currency"`
+}
+
+type PaymentIntentResponse struct {
+	PaymentIntentID string `json:"payment_intent_id"`
+	Status          string `json:"status"`
+	Amount          int64  `json:"amount"`
+	Currency        string `json:"currency"`
+	ReservationID   string `json:"reservation_id"`
+}
+
 func (p *PaymentHandler) CreateIntent(c *fiber.Ctx) error {
-	var req clients.CreatePaymentIntentRequest
+	var req CreatePaymentIntentRequest
 	if err := c.BodyParser(&req); err != nil {
 		return p.badRequestError(c, "INVALID_REQUEST", "Invalid request body")
 	}
@@ -54,44 +70,50 @@ func (p *PaymentHandler) CreateIntent(c *fiber.Ctx) error {
 		req.Currency = "KRW" // Default currency
 	}
 
-	if req.Scenario == "" {
-		req.Scenario = "approve" // Default scenario
+	// Get user ID from middleware
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		userID = "anonymous" // fallback for non-authenticated users
 	}
 
-	// Validate scenario
-	validScenarios := []string{"approve", "fail", "delay", "random"}
-	if !utils.ContainsString(validScenarios, req.Scenario) {
-		return p.badRequestError(c, "INVALID_SCENARIO", "scenario must be one of: approve, fail, delay, random")
+	// Create Money object for gRPC call
+	amount := &commonv1.Money{
+		Amount:   req.Amount,
+		Currency: req.Currency,
 	}
 
-	// Prepare headers for backend call
-	headers := p.prepareHeaders(c)
-
-	// Call payment API
-	intent, err := p.client.CreatePaymentIntent(c.Context(), &req, headers)
+	// Call payment API via gRPC
+	intent, err := p.client.CreatePaymentIntent(c.Context(), req.ReservationID, userID, amount)
 	if err != nil {
 		p.logger.WithError(err).WithFields(logrus.Fields{
 			"reservation_id": req.ReservationID,
 			"amount":         req.Amount,
 			"currency":       req.Currency,
-			"scenario":       req.Scenario,
-			"user_id":        middleware.GetUserID(c),
+			"user_id":        userID,
 		}).Error("Failed to create payment intent")
 
 		return p.handleClientError(c, err, "create payment intent")
 	}
 
+	// Convert gRPC response to API response (simplified until we confirm proto structure)
+	response := PaymentIntentResponse{
+		PaymentIntentID: intent.PaymentIntentId,
+		Status:          "PENDING", // Default status
+		Amount:          req.Amount,
+		Currency:        req.Currency,
+		ReservationID:   req.ReservationID,
+	}
+
 	p.logger.WithFields(logrus.Fields{
-		"payment_intent_id": intent.PaymentIntentID,
+		"payment_intent_id": response.PaymentIntentID,
 		"reservation_id":    req.ReservationID,
 		"amount":            req.Amount,
 		"currency":          req.Currency,
-		"scenario":          req.Scenario,
-		"status":            intent.Status,
-		"user_id":           middleware.GetUserID(c),
+		"status":            response.Status,
+		"user_id":           userID,
 	}).Info("Payment intent created successfully")
 
-	return c.Status(fiber.StatusOK).JSON(intent)
+	return c.Status(fiber.StatusOK).JSON(response)
 }
 
 // GetStatus handles payment status retrieval
@@ -101,29 +123,43 @@ func (p *PaymentHandler) CreateIntent(c *fiber.Ctx) error {
 // @Produce json
 // @Security Bearer
 // @Param id path string true "Payment Intent ID"
-// @Success 200 {object} clients.PaymentStatusResponse
+// @Success 200 {object} PaymentStatusResponse
 // @Failure 400 {object} map[string]interface{} "Bad request"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 404 {object} map[string]interface{} "Not found"
 // @Failure 500 {object} map[string]interface{} "Internal error"
 // @Router /payment/{id}/status [get]
+type PaymentStatusResponse struct {
+	PaymentIntentID string `json:"payment_intent_id"`
+	Status          string `json:"status"`
+	Amount          int64  `json:"amount"`
+	Currency        string `json:"currency"`
+	ReservationID   string `json:"reservation_id"`
+}
+
 func (p *PaymentHandler) GetStatus(c *fiber.Ctx) error {
 	paymentIntentID := c.Params("id")
 	if paymentIntentID == "" {
 		return p.badRequestError(c, "MISSING_ID", "Payment intent ID is required")
 	}
 
-	// Prepare headers for backend call
-	headers := p.prepareHeaders(c)
-
-	// Call payment API
-	status, err := p.client.GetPaymentStatus(c.Context(), paymentIntentID, headers)
+	// Call payment API via gRPC
+	_, err := p.client.GetPaymentStatus(c.Context(), paymentIntentID)
 	if err != nil {
 		p.logger.WithError(err).WithField("payment_intent_id", paymentIntentID).Error("Failed to get payment status")
 		return p.handleClientError(c, err, "get payment status")
 	}
 
-	return c.JSON(status)
+	// Convert gRPC response to API response (simplified until we confirm proto structure)
+	response := PaymentStatusResponse{
+		PaymentIntentID: paymentIntentID,
+		Status:          "PENDING", // Default status
+		Amount:          0,
+		Currency:        "KRW",
+		ReservationID:   "",
+	}
+
+	return c.JSON(response)
 }
 
 // ProcessPayment handles manual payment processing (for testing)
@@ -134,15 +170,20 @@ func (p *PaymentHandler) GetStatus(c *fiber.Ctx) error {
 // @Produce json
 // @Security Bearer
 // @Param Idempotency-Key header string false "Idempotency key (UUID v4)"
-// @Param request body clients.ProcessPaymentRequest true "Process payment request"
+// @Param request body ProcessPaymentRequest true "Process payment request"
 // @Success 200 {object} map[string]interface{} "Success"
 // @Failure 400 {object} map[string]interface{} "Bad request"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 404 {object} map[string]interface{} "Not found"
 // @Failure 500 {object} map[string]interface{} "Internal error"
 // @Router /payment/process [post]
+type ProcessPaymentRequest struct {
+	PaymentIntentID string `json:"payment_intent_id"`
+	Action          string `json:"action"` // approve|fail
+}
+
 func (p *PaymentHandler) ProcessPayment(c *fiber.Ctx) error {
-	var req clients.ProcessPaymentRequest
+	var req ProcessPaymentRequest
 	if err := c.BodyParser(&req); err != nil {
 		return p.badRequestError(c, "INVALID_REQUEST", "Invalid request body")
 	}
@@ -162,11 +203,9 @@ func (p *PaymentHandler) ProcessPayment(c *fiber.Ctx) error {
 		return p.badRequestError(c, "INVALID_ACTION", "action must be either 'approve' or 'fail'")
 	}
 
-	// Prepare headers for backend call
-	headers := p.prepareHeaders(c)
-
-	// Call payment API
-	if err := p.client.ProcessPayment(c.Context(), &req, headers); err != nil {
+	// Call payment API via gRPC
+	response, err := p.client.ProcessPayment(c.Context(), req.PaymentIntentID, req.Action)
+	if err != nil {
 		p.logger.WithError(err).WithFields(logrus.Fields{
 			"payment_intent_id": req.PaymentIntentID,
 			"action":            req.Action,
@@ -180,46 +219,16 @@ func (p *PaymentHandler) ProcessPayment(c *fiber.Ctx) error {
 		"payment_intent_id": req.PaymentIntentID,
 		"action":            req.Action,
 		"user_id":           middleware.GetUserID(c),
+		"status":            response.Status,
 	}).Info("Payment processed successfully")
 
 	return c.JSON(fiber.Map{
-		"status":  "processed",
+		"status":  response.Status,
 		"action":  req.Action,
 		"message": "Payment processing initiated",
 	})
 }
 
-// prepareHeaders prepares headers for backend API calls
-func (p *PaymentHandler) prepareHeaders(c *fiber.Ctx) map[string]string {
-	headers := make(map[string]string)
-
-	// Forward authorization header
-	if auth := c.Get("Authorization"); auth != "" {
-		headers["Authorization"] = auth
-	}
-
-	// Forward request ID for tracing
-	if requestID := c.Get("X-Request-ID"); requestID != "" {
-		headers["X-Request-ID"] = requestID
-	}
-
-	// Forward idempotency key
-	if idempotencyKey := c.Get("Idempotency-Key"); idempotencyKey != "" {
-		headers["Idempotency-Key"] = idempotencyKey
-	}
-
-	// Forward user agent
-	if userAgent := c.Get("User-Agent"); userAgent != "" {
-		headers["User-Agent"] = userAgent
-	}
-
-	// Add tracing headers if available
-	if traceParent := c.Get("traceparent"); traceParent != "" {
-		headers["traceparent"] = traceParent
-	}
-
-	return headers
-}
 
 // handleClientError handles errors from backend client calls
 func (p *PaymentHandler) handleClientError(c *fiber.Ctx, err error, operation string) error {

@@ -1,53 +1,24 @@
 package clients
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"crypto/tls"
 	"fmt"
-	"io"
-	"net/http"
 	"time"
 
 	"github.com/traffic-tacos/gateway-api/internal/config"
+	reservationv1 "github.com/traffic-tacos/proto-contracts/gen/go/reservation/v1"
 
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type ReservationClient struct {
-	baseURL    string
-	httpClient *http.Client
-	logger     *logrus.Logger
-}
-
-// Reservation request/response models
-type CreateReservationRequest struct {
-	EventID            string   `json:"event_id"`
-	SeatIDs            []string `json:"seat_ids"`
-	Quantity           int      `json:"quantity"`
-	ReservationToken   string   `json:"reservation_token,omitempty"`
-	UserID             string   `json:"user_id,omitempty"`
-}
-
-type ReservationResponse struct {
-	ReservationID   string    `json:"reservation_id"`
-	Status          string    `json:"status"`
-	HoldExpiresAt   time.Time `json:"hold_expires_at"`
-	EventID         string    `json:"event_id"`
-	SeatIDs         []string  `json:"seat_ids"`
-	Quantity        int       `json:"quantity"`
-	UserID          string    `json:"user_id"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-}
-
-type ConfirmReservationRequest struct {
-	PaymentIntentID string `json:"payment_intent_id"`
-}
-
-type ConfirmReservationResponse struct {
-	OrderID string `json:"order_id"`
-	Status  string `json:"status"`
+	conn   *grpc.ClientConn
+	client reservationv1.ReservationServiceClient
+	logger *logrus.Logger
 }
 
 type ErrorResponse struct {
@@ -58,192 +29,154 @@ type ErrorResponse struct {
 	} `json:"error"`
 }
 
-func NewReservationClient(cfg *config.ReservationAPIConfig, logger *logrus.Logger) *ReservationClient {
-	// Create HTTP client with timeout and retry configuration
-	client := &http.Client{
-		Timeout: cfg.Timeout,
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
-			DisableKeepAlives:   false,
-		},
+func NewReservationClient(cfg *config.ReservationAPIConfig, logger *logrus.Logger) (*ReservationClient, error) {
+	// Setup gRPC connection options
+	var opts []grpc.DialOption
+
+	if cfg.TLSEnabled {
+		creds := credentials.NewTLS(&tls.Config{
+			ServerName: cfg.GRPCAddress,
+		})
+		opts = append(opts, grpc.WithTransportCredentials(creds))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	return &ReservationClient{
-		baseURL:    cfg.BaseURL,
-		httpClient: client,
-		logger:     logger,
+	// Add timeout
+	opts = append(opts, grpc.WithTimeout(cfg.Timeout))
+
+	// Create gRPC connection
+	conn, err := grpc.Dial(cfg.GRPCAddress, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to reservation service: %w", err)
 	}
+
+	// Create gRPC client
+	client := reservationv1.NewReservationServiceClient(conn)
+
+	return &ReservationClient{
+		conn:   conn,
+		client: client,
+		logger: logger,
+	}, nil
+}
+
+// Close closes the gRPC connection
+func (r *ReservationClient) Close() error {
+	return r.conn.Close()
 }
 
 // CreateReservation creates a new reservation
-func (r *ReservationClient) CreateReservation(ctx context.Context, req *CreateReservationRequest, headers map[string]string) (*ReservationResponse, error) {
-	url := fmt.Sprintf("%s/v1/reservations", r.baseURL)
-
-	resp, err := r.makeRequest(ctx, "POST", url, req, headers)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create reservation: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated {
-		return nil, r.handleErrorResponse(resp, "create reservation")
+func (r *ReservationClient) CreateReservation(ctx context.Context, eventID string, seatIDs []string, quantity int32, reservationToken, userID string) (*reservationv1.CreateReservationResponse, error) {
+	req := &reservationv1.CreateReservationRequest{
+		EventId:          eventID,
+		SeatIds:          seatIDs,
+		Quantity:         quantity,
+		ReservationToken: reservationToken,
+		UserId:           userID,
 	}
 
-	var reservation ReservationResponse
-	if err := json.NewDecoder(resp.Body).Decode(&reservation); err != nil {
-		return nil, fmt.Errorf("failed to decode reservation response: %w", err)
-	}
-
-	return &reservation, nil
-}
-
-// GetReservation retrieves a reservation by ID
-func (r *ReservationClient) GetReservation(ctx context.Context, reservationID string, headers map[string]string) (*ReservationResponse, error) {
-	url := fmt.Sprintf("%s/v1/reservations/%s", r.baseURL, reservationID)
-
-	resp, err := r.makeRequest(ctx, "GET", url, nil, headers)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get reservation: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, r.handleErrorResponse(resp, "get reservation")
-	}
-
-	var reservation ReservationResponse
-	if err := json.NewDecoder(resp.Body).Decode(&reservation); err != nil {
-		return nil, fmt.Errorf("failed to decode reservation response: %w", err)
-	}
-
-	return &reservation, nil
-}
-
-// ConfirmReservation confirms a reservation
-func (r *ReservationClient) ConfirmReservation(ctx context.Context, reservationID string, req *ConfirmReservationRequest, headers map[string]string) (*ConfirmReservationResponse, error) {
-	url := fmt.Sprintf("%s/v1/reservations/%s/confirm", r.baseURL, reservationID)
-
-	resp, err := r.makeRequest(ctx, "POST", url, req, headers)
-	if err != nil {
-		return nil, fmt.Errorf("failed to confirm reservation: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, r.handleErrorResponse(resp, "confirm reservation")
-	}
-
-	var confirmation ConfirmReservationResponse
-	if err := json.NewDecoder(resp.Body).Decode(&confirmation); err != nil {
-		return nil, fmt.Errorf("failed to decode confirmation response: %w", err)
-	}
-
-	return &confirmation, nil
-}
-
-// CancelReservation cancels a reservation
-func (r *ReservationClient) CancelReservation(ctx context.Context, reservationID string, headers map[string]string) error {
-	url := fmt.Sprintf("%s/v1/reservations/%s/cancel", r.baseURL, reservationID)
-
-	resp, err := r.makeRequest(ctx, "POST", url, nil, headers)
-	if err != nil {
-		return fmt.Errorf("failed to cancel reservation: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return r.handleErrorResponse(resp, "cancel reservation")
-	}
-
-	return nil
-}
-
-// makeRequest makes an HTTP request with proper headers and context
-func (r *ReservationClient) makeRequest(ctx context.Context, method, url string, body interface{}, headers map[string]string) (*http.Response, error) {
-	var reqBody io.Reader
-	if body != nil {
-		jsonData, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %w", err)
-		}
-		reqBody = bytes.NewBuffer(jsonData)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set default headers
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	// Set custom headers
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-
-	// Log request
 	r.logger.WithFields(logrus.Fields{
-		"method": method,
-		"url":    url,
-		"headers": r.sanitizeHeaders(headers),
-	}).Debug("Making reservation API request")
+		"event_id":          eventID,
+		"seat_ids":          seatIDs,
+		"quantity":          quantity,
+		"reservation_token": reservationToken,
+		"user_id":           userID,
+	}).Debug("Creating reservation via gRPC")
 
 	start := time.Now()
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.client.CreateReservation(ctx, req)
 	latency := time.Since(start)
 
-	// Log response
 	r.logger.WithFields(logrus.Fields{
-		"method":      method,
-		"url":         url,
-		"status_code": r.getStatusCode(resp),
-		"latency_ms":  latency.Milliseconds(),
-	}).Debug("Reservation API response")
+		"latency_ms": latency.Milliseconds(),
+		"success":    err == nil,
+	}).Debug("Create reservation gRPC call completed")
 
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("failed to create reservation: %w", err)
 	}
 
 	return resp, nil
 }
 
-// handleErrorResponse handles error responses from the reservation API
-func (r *ReservationClient) handleErrorResponse(resp *http.Response, operation string) error {
-	body, err := io.ReadAll(resp.Body)
+// GetReservation retrieves a reservation by ID
+func (r *ReservationClient) GetReservation(ctx context.Context, reservationID string) (*reservationv1.GetReservationResponse, error) {
+	req := &reservationv1.GetReservationRequest{
+		ReservationId: reservationID,
+	}
+
+	r.logger.WithFields(logrus.Fields{
+		"reservation_id": reservationID,
+	}).Debug("Getting reservation via gRPC")
+
+	start := time.Now()
+	resp, err := r.client.GetReservation(ctx, req)
+	latency := time.Since(start)
+
+	r.logger.WithFields(logrus.Fields{
+		"latency_ms": latency.Milliseconds(),
+		"success":    err == nil,
+	}).Debug("Get reservation gRPC call completed")
+
 	if err != nil {
-		return fmt.Errorf("%s failed with status %d: failed to read error response", operation, resp.StatusCode)
+		return nil, fmt.Errorf("failed to get reservation: %w", err)
 	}
 
-	var errorResp ErrorResponse
-	if err := json.Unmarshal(body, &errorResp); err != nil {
-		return fmt.Errorf("%s failed with status %d: %s", operation, resp.StatusCode, string(body))
-	}
-
-	return fmt.Errorf("%s failed: %s (%s)", operation, errorResp.Error.Message, errorResp.Error.Code)
+	return resp, nil
 }
 
-// sanitizeHeaders removes sensitive headers for logging
-func (r *ReservationClient) sanitizeHeaders(headers map[string]string) map[string]string {
-	sanitized := make(map[string]string)
-	for key, value := range headers {
-		if key == "Authorization" {
-			sanitized[key] = "Bearer [REDACTED]"
-		} else {
-			sanitized[key] = value
-		}
+// ConfirmReservation confirms a reservation
+func (r *ReservationClient) ConfirmReservation(ctx context.Context, reservationID, paymentIntentID string) (*reservationv1.ConfirmReservationResponse, error) {
+	req := &reservationv1.ConfirmReservationRequest{
+		ReservationId:   reservationID,
+		PaymentIntentId: paymentIntentID,
 	}
-	return sanitized
+
+	r.logger.WithFields(logrus.Fields{
+		"reservation_id":    reservationID,
+		"payment_intent_id": paymentIntentID,
+	}).Debug("Confirming reservation via gRPC")
+
+	start := time.Now()
+	resp, err := r.client.ConfirmReservation(ctx, req)
+	latency := time.Since(start)
+
+	r.logger.WithFields(logrus.Fields{
+		"latency_ms": latency.Milliseconds(),
+		"success":    err == nil,
+	}).Debug("Confirm reservation gRPC call completed")
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to confirm reservation: %w", err)
+	}
+
+	return resp, nil
 }
 
-// getStatusCode safely gets status code from response
-func (r *ReservationClient) getStatusCode(resp *http.Response) int {
-	if resp == nil {
-		return 0
+// CancelReservation cancels a reservation
+func (r *ReservationClient) CancelReservation(ctx context.Context, reservationID string) (*reservationv1.CancelReservationResponse, error) {
+	req := &reservationv1.CancelReservationRequest{
+		ReservationId: reservationID,
 	}
-	return resp.StatusCode
+
+	r.logger.WithFields(logrus.Fields{
+		"reservation_id": reservationID,
+	}).Debug("Canceling reservation via gRPC")
+
+	start := time.Now()
+	resp, err := r.client.CancelReservation(ctx, req)
+	latency := time.Since(start)
+
+	r.logger.WithFields(logrus.Fields{
+		"latency_ms": latency.Milliseconds(),
+		"success":    err == nil,
+	}).Debug("Cancel reservation gRPC call completed")
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to cancel reservation: %w", err)
+	}
+
+	return resp, nil
 }
+

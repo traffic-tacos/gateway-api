@@ -1,223 +1,145 @@
 package clients
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"crypto/tls"
 	"fmt"
-	"io"
-	"net/http"
 	"time"
 
 	"github.com/traffic-tacos/gateway-api/internal/config"
+	paymentv1 "github.com/traffic-tacos/proto-contracts/gen/go/payment/v1"
+	commonv1 "github.com/traffic-tacos/proto-contracts/gen/go/common/v1"
 
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type PaymentClient struct {
-	baseURL    string
-	httpClient *http.Client
-	logger     *logrus.Logger
+	conn   *grpc.ClientConn
+	client paymentv1.PaymentServiceClient
+	logger *logrus.Logger
 }
 
-// Payment request/response models
-type CreatePaymentIntentRequest struct {
-	ReservationID string `json:"reservation_id"`
-	Amount        int64  `json:"amount"`
-	Currency      string `json:"currency"`
-	Scenario      string `json:"scenario"` // approve|fail|delay|random
-}
+func NewPaymentClient(cfg *config.PaymentAPIConfig, logger *logrus.Logger) (*PaymentClient, error) {
+	// Setup gRPC connection options
+	var opts []grpc.DialOption
 
-type PaymentIntentResponse struct {
-	PaymentIntentID string `json:"payment_intent_id"`
-	Status          string `json:"status"`
-	Amount          int64  `json:"amount"`
-	Currency        string `json:"currency"`
-	ReservationID   string `json:"reservation_id"`
-	CreatedAt       time.Time `json:"created_at"`
-	Next            string `json:"next,omitempty"`
-}
-
-type PaymentStatusResponse struct {
-	PaymentIntentID string    `json:"payment_intent_id"`
-	Status          string    `json:"status"`
-	Amount          int64     `json:"amount"`
-	Currency        string    `json:"currency"`
-	ReservationID   string    `json:"reservation_id"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-	ProcessedAt     *time.Time `json:"processed_at,omitempty"`
-}
-
-func NewPaymentClient(cfg *config.PaymentAPIConfig, logger *logrus.Logger) *PaymentClient {
-	// Create HTTP client with timeout and retry configuration
-	client := &http.Client{
-		Timeout: cfg.Timeout,
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
-			DisableKeepAlives:   false,
-		},
+	if cfg.TLSEnabled {
+		creds := credentials.NewTLS(&tls.Config{
+			ServerName: cfg.GRPCAddress,
+		})
+		opts = append(opts, grpc.WithTransportCredentials(creds))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
+
+	// Add timeout
+	opts = append(opts, grpc.WithTimeout(cfg.Timeout))
+
+	// Create gRPC connection
+	conn, err := grpc.Dial(cfg.GRPCAddress, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to payment service: %w", err)
+	}
+
+	// Create gRPC client
+	client := paymentv1.NewPaymentServiceClient(conn)
 
 	return &PaymentClient{
-		baseURL:    cfg.BaseURL,
-		httpClient: client,
-		logger:     logger,
-	}
+		conn:   conn,
+		client: client,
+		logger: logger,
+	}, nil
+}
+
+// Close closes the gRPC connection
+func (p *PaymentClient) Close() error {
+	return p.conn.Close()
 }
 
 // CreatePaymentIntent creates a new payment intent
-func (p *PaymentClient) CreatePaymentIntent(ctx context.Context, req *CreatePaymentIntentRequest, headers map[string]string) (*PaymentIntentResponse, error) {
-	url := fmt.Sprintf("%s/v1/sim/intent", p.baseURL)
-
-	resp, err := p.makeRequest(ctx, "POST", url, req, headers)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create payment intent: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, p.handleErrorResponse(resp, "create payment intent")
+func (p *PaymentClient) CreatePaymentIntent(ctx context.Context, reservationID, userID string, amount *commonv1.Money) (*paymentv1.CreatePaymentIntentResponse, error) {
+	req := &paymentv1.CreatePaymentIntentRequest{
+		ReservationId: reservationID,
+		UserId:        userID,
+		Amount:        amount,
 	}
 
-	var intent PaymentIntentResponse
-	if err := json.NewDecoder(resp.Body).Decode(&intent); err != nil {
-		return nil, fmt.Errorf("failed to decode payment intent response: %w", err)
-	}
-
-	return &intent, nil
-}
-
-// GetPaymentStatus retrieves payment status by intent ID
-func (p *PaymentClient) GetPaymentStatus(ctx context.Context, paymentIntentID string, headers map[string]string) (*PaymentStatusResponse, error) {
-	url := fmt.Sprintf("%s/v1/sim/intents/%s", p.baseURL, paymentIntentID)
-
-	resp, err := p.makeRequest(ctx, "GET", url, nil, headers)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get payment status: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, p.handleErrorResponse(resp, "get payment status")
-	}
-
-	var status PaymentStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return nil, fmt.Errorf("failed to decode payment status response: %w", err)
-	}
-
-	return &status, nil
-}
-
-// ProcessPayment manually triggers payment processing (for testing)
-type ProcessPaymentRequest struct {
-	PaymentIntentID string `json:"payment_intent_id"`
-	Action          string `json:"action"` // approve|fail
-}
-
-func (p *PaymentClient) ProcessPayment(ctx context.Context, req *ProcessPaymentRequest, headers map[string]string) error {
-	url := fmt.Sprintf("%s/v1/sim/webhook/test", p.baseURL)
-
-	resp, err := p.makeRequest(ctx, "POST", url, req, headers)
-	if err != nil {
-		return fmt.Errorf("failed to process payment: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return p.handleErrorResponse(resp, "process payment")
-	}
-
-	return nil
-}
-
-// makeRequest makes an HTTP request with proper headers and context
-func (p *PaymentClient) makeRequest(ctx context.Context, method, url string, body interface{}, headers map[string]string) (*http.Response, error) {
-	var reqBody io.Reader
-	if body != nil {
-		jsonData, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %w", err)
-		}
-		reqBody = bytes.NewBuffer(jsonData)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set default headers
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	// Set custom headers
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-
-	// Log request
 	p.logger.WithFields(logrus.Fields{
-		"method": method,
-		"url":    url,
-		"headers": p.sanitizeHeaders(headers),
-	}).Debug("Making payment API request")
+		"reservation_id": reservationID,
+		"user_id":        userID,
+		"amount":         amount.Amount,
+		"currency":       amount.Currency,
+	}).Debug("Creating payment intent via gRPC")
 
 	start := time.Now()
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.client.CreatePaymentIntent(ctx, req)
 	latency := time.Since(start)
 
-	// Log response
 	p.logger.WithFields(logrus.Fields{
-		"method":      method,
-		"url":         url,
-		"status_code": p.getStatusCode(resp),
-		"latency_ms":  latency.Milliseconds(),
-	}).Debug("Payment API response")
+		"latency_ms": latency.Milliseconds(),
+		"success":    err == nil,
+	}).Debug("Payment intent gRPC call completed")
 
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("failed to create payment intent: %w", err)
 	}
 
 	return resp, nil
 }
 
-// handleErrorResponse handles error responses from the payment API
-func (p *PaymentClient) handleErrorResponse(resp *http.Response, operation string) error {
-	body, err := io.ReadAll(resp.Body)
+// GetPaymentStatus retrieves payment status by intent ID
+func (p *PaymentClient) GetPaymentStatus(ctx context.Context, paymentIntentID string) (*paymentv1.GetPaymentStatusResponse, error) {
+	req := &paymentv1.GetPaymentStatusRequest{
+		PaymentIntentId: paymentIntentID,
+	}
+
+	p.logger.WithFields(logrus.Fields{
+		"payment_intent_id": paymentIntentID,
+	}).Debug("Getting payment status via gRPC")
+
+	start := time.Now()
+	resp, err := p.client.GetPaymentStatus(ctx, req)
+	latency := time.Since(start)
+
+	p.logger.WithFields(logrus.Fields{
+		"latency_ms": latency.Milliseconds(),
+		"success":    err == nil,
+	}).Debug("Payment status gRPC call completed")
+
 	if err != nil {
-		return fmt.Errorf("%s failed with status %d: failed to read error response", operation, resp.StatusCode)
+		return nil, fmt.Errorf("failed to get payment status: %w", err)
 	}
 
-	var errorResp ErrorResponse
-	if err := json.Unmarshal(body, &errorResp); err != nil {
-		return fmt.Errorf("%s failed with status %d: %s", operation, resp.StatusCode, string(body))
-	}
-
-	return fmt.Errorf("%s failed: %s (%s)", operation, errorResp.Error.Message, errorResp.Error.Code)
+	return resp, nil
 }
 
-// sanitizeHeaders removes sensitive headers for logging
-func (p *PaymentClient) sanitizeHeaders(headers map[string]string) map[string]string {
-	sanitized := make(map[string]string)
-	for key, value := range headers {
-		if key == "Authorization" {
-			sanitized[key] = "Bearer [REDACTED]"
-		} else {
-			sanitized[key] = value
-		}
+// ProcessPayment manually triggers payment processing (for testing)
+func (p *PaymentClient) ProcessPayment(ctx context.Context, paymentIntentID string, action string) (*paymentv1.ProcessPaymentResponse, error) {
+	req := &paymentv1.ProcessPaymentRequest{
+		PaymentIntentId: paymentIntentID,
 	}
-	return sanitized
+
+	p.logger.WithFields(logrus.Fields{
+		"payment_intent_id": paymentIntentID,
+		"action":            action,
+	}).Debug("Processing payment via gRPC")
+
+	start := time.Now()
+	resp, err := p.client.ProcessPayment(ctx, req)
+	latency := time.Since(start)
+
+	p.logger.WithFields(logrus.Fields{
+		"latency_ms": latency.Milliseconds(),
+		"success":    err == nil,
+	}).Debug("Process payment gRPC call completed")
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to process payment: %w", err)
+	}
+
+	return resp, nil
 }
 
-// getStatusCode safely gets status code from response
-func (p *PaymentClient) getStatusCode(resp *http.Response) int {
-	if resp == nil {
-		return 0
-	}
-	return resp.StatusCode
-}
