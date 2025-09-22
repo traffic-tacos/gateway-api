@@ -113,7 +113,7 @@ GET  /metrics                  # Prometheus 메트릭
 
 ### Reservation API (Spring Boot)
 ```yaml
-base_url: http://reservation-api.tickets-api.svc.cluster.local:8080
+base_url: http://reservation-api.tickets-api.svc.cluster.local:8010
 timeout: 600ms
 mapping:
   /api/v1/reservations/* → /v1/reservations/*
@@ -123,9 +123,9 @@ headers:
   - authorization
 ```
 
-### Payment API (Node.js)
+### Payment API (Go)
 ```yaml
-base_url: http://payment-sim-api.tickets-api.svc.cluster.local:8080
+base_url: http://payment-sim-api.tickets-api.svc.cluster.local:8030
 timeout: 400ms
 mapping:
   /api/v1/payment/* → /v1/sim/*
