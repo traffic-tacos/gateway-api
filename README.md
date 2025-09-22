@@ -2,6 +2,14 @@
 
 A high-performance BFF (Backend for Frontend) service for the Traffic Tacos ticket reservation system, designed to handle 30k RPS traffic with robust authentication, rate limiting, and observability.
 
+## Recent Updates
+
+- ✅ **Local Development Setup**: Complete Redis installation and configuration guide
+- ✅ **AWS ElastiCache Integration**: Production-ready Redis with Secrets Manager auth
+- ✅ **gRPC Planning**: Comprehensive migration strategy documented in [GRPC_PLAN.md](GRPC_PLAN.md)
+- ✅ **Compilation Fixes**: Resolved function conflicts and Fiber middleware compatibility
+- ✅ **Enhanced Documentation**: Updated Swagger docs and local development guides
+
 ## Features
 
 - **High Performance**: Built with Go and Fiber framework for handling 30k RPS
@@ -11,6 +19,8 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
 - **Observability**: Prometheus metrics, OpenTelemetry tracing, structured logging
 - **Queue Management**: Virtual queuing system for traffic control
 - **Backend Integration**: Seamless proxy to reservation and payment APIs
+- **gRPC Support**: Integration with Traffic Tacos proto contracts for high-performance inter-service communication
+- **AWS Integration**: ElastiCache Redis with Secrets Manager for production deployment
 
 ## Architecture
 
@@ -32,39 +42,60 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
 ### Prerequisites
 
 - Go 1.22+
-- Docker
-- Redis (for rate limiting and caching)
+- Redis (local or AWS ElastiCache)
 - Access to JWT JWKS endpoint
+- AWS CLI configured (for ElastiCache access)
 
-### Environment Setup
+### Local Development Setup
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/traffic-tacos/gateway-api.git
    cd gateway-api
    ```
 
-2. **Setup local environment**
+2. **Install Redis locally**
    ```bash
-   # Quick setup (recommended)
-   ./run_local.sh setup
+   # macOS
+   brew install redis
+   brew services start redis
 
-   # Or manual setup
-   cp .env.local .env
-   # Edit .env with your JWT configuration
+   # Or use Docker
+   docker run -d --name redis -p 6379:6379 redis:7-alpine
    ```
 
-3. **Run locally**
+3. **Setup environment configuration**
    ```bash
-   # Start the application (includes Redis setup)
-   ./run_local.sh
+   # For local development with local Redis
+   cp .env .env.local
 
-   # Or run with Docker
-   make docker-build
-   make docker-run
+   # For AWS ElastiCache development
+   cp .env.aws .env.local
+   # Edit AWS profile and ElastiCache endpoints
    ```
 
-### Manual Setup
+4. **Run the application**
+   ```bash
+   # Load environment and start
+   source .env.local
+   export JWT_JWKS_ENDPOINT="https://www.googleapis.com/oauth2/v3/certs"
+   export JWT_ISSUER="https://accounts.google.com"
+   export JWT_AUDIENCE="gateway-api-local"
+
+   go run cmd/gateway/main.go
+   ```
+
+5. **Access Swagger documentation**
+   ```
+   http://localhost:8000/swagger/index.html
+   ```
+
+6. **Additional Resources**
+   - [Local Development Guide](README_LOCAL.md) - Detailed Redis setup options
+   - [gRPC Migration Plan](GRPC_PLAN.md) - Protocol Buffers integration strategy
+   - [AWS Configuration](.env.aws) - ElastiCache and Secrets Manager setup
+
+### Alternative Setup (Manual)
 
 1. **Install dependencies**
    ```bash
@@ -73,10 +104,11 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
 
 2. **Set environment variables**
    ```bash
-   export JWT_JWKS_ENDPOINT="https://your-auth-provider.com/.well-known/jwks.json"
-   export JWT_ISSUER="https://your-auth-provider.com"
-   export JWT_AUDIENCE="gateway-api"
+   export JWT_JWKS_ENDPOINT="https://www.googleapis.com/oauth2/v3/certs"
+   export JWT_ISSUER="https://accounts.google.com"
+   export JWT_AUDIENCE="gateway-api-local"
    export REDIS_ADDRESS="localhost:6379"
+   export SERVER_PORT="8000"
    ```
 
 3. **Run the application**
@@ -113,16 +145,15 @@ export AWS_PROFILE=tacos
 export AWS_REGION=ap-northeast-2
 
 # ElastiCache Redis
-export REDIS_ADDRESS="your-elasticache-cluster.cache.amazonaws.com:6379"
-
-# For ElastiCache with AUTH token
-export REDIS_PASSWORD="your-auth-token"
-
-# For ElastiCache with in-transit encryption
+export REDIS_ADDRESS="master.traffic-tacos-redis.w6eqga.apn2.cache.amazonaws.com:6379"
 export REDIS_TLS_ENABLED=true
 
-# Secrets Manager integration
-export AWS_SECRET_NAME="gateway-api/secrets"
+# Secrets Manager integration for Redis AUTH token
+export AWS_SECRET_NAME="traffic-tacos/redis/auth-token"
+export REDIS_PASSWORD_FROM_SECRETS=true
+
+# Other AWS configurations
+export AWS_SDK_LOAD_CONFIG=true
 ```
 
 #### ElastiCache Setup
@@ -135,13 +166,15 @@ export AWS_SECRET_NAME="gateway-api/secrets"
 
 2. **Update .env file**:
    ```bash
-   # Copy and edit environment file
-   cp .env.local .env
+   # Copy and edit environment file for AWS
+   cp .env.aws .env.local
 
-   # Update Redis address to your ElastiCache endpoint
-   REDIS_ADDRESS=your-cluster.abc123.cache.amazonaws.com:6379
+   # Or manually update Redis address to your ElastiCache endpoint
+   REDIS_ADDRESS=master.traffic-tacos-redis.w6eqga.apn2.cache.amazonaws.com:6379
    AWS_PROFILE=tacos
    AWS_REGION=ap-northeast-2
+   REDIS_TLS_ENABLED=true
+   REDIS_PASSWORD_FROM_SECRETS=true
    ```
 
 3. **Security Group Configuration**:
@@ -319,48 +352,71 @@ Structured JSON logging with:
 
 ### Local Development
 
-#### Quick Start
-```bash
-# Setup and run in one command
-./run_local.sh
+#### Recommended Setup
 
-# Or step by step
-./run_local.sh setup    # Setup environment and dependencies
-./run_local.sh run      # Start the application
-```
-
-#### Manual Development
-1. **Setup environment**
+1. **Install Redis locally**
    ```bash
-   cp .env.local .env
-   # Edit .env with your JWT configuration
+   # macOS with Homebrew
+   brew install redis
+   brew services start redis
+
+   # Verify Redis is running
+   redis-cli ping  # Should return PONG
    ```
 
-2. **Start dependencies**
+2. **Setup environment**
    ```bash
-   # Redis is required for rate limiting
-   docker run -d --name redis -p 6379:6379 redis:7-alpine
+   # For local development
+   cp .env .env.local
+   # Edit .env.local with your preferred configuration
    ```
 
 3. **Run the service**
    ```bash
+   # Load environment and start
+   source .env.local
+   export JWT_JWKS_ENDPOINT="https://www.googleapis.com/oauth2/v3/certs"
+   export JWT_ISSUER="https://accounts.google.com"
+   export JWT_AUDIENCE="gateway-api-local"
+
    go run cmd/gateway/main.go
    ```
 
-4. **Generate API docs**
+4. **Access services**
    ```bash
-   make swagger
+   # API Documentation
+   open http://localhost:8000/swagger/index.html
+
+   # Health Check
+   curl http://localhost:8000/healthz
+
+   # Metrics
+   curl http://localhost:8000/metrics
    ```
 
-#### Development Commands
+#### Alternative: Docker Redis
 ```bash
-./run_local.sh setup    # Initial setup
-./run_local.sh build    # Build application
-./run_local.sh run      # Run application
-./run_local.sh docs     # Generate Swagger docs
-./run_local.sh redis    # Start Redis if needed
-./run_local.sh clean    # Cleanup containers
-./run_local.sh help     # Show all commands
+# If you prefer Docker for Redis
+docker run -d --name redis -p 6379:6379 redis:7-alpine
+
+# Verify Redis is accessible
+docker exec redis redis-cli ping
+```
+
+#### Development Tools
+```bash
+# Generate/Update Swagger docs
+go install github.com/swaggo/swag/cmd/swag@latest
+swag init -g cmd/gateway/main.go -o docs
+
+# Build the application
+go build -o gateway-api cmd/gateway/main.go
+
+# Run tests
+go test ./internal/... -v
+
+# Check Redis connection
+redis-cli -h localhost -p 6379 ping
 ```
 
 ### Testing
