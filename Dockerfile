@@ -16,6 +16,15 @@ RUN go mod download
 # Copy source code
 COPY . .
 
+# Install swag for generating swagger docs
+RUN go install github.com/swaggo/swag/cmd/swag@v1.16.3
+
+# Generate swagger docs
+RUN swag init -g cmd/gateway/main.go -o docs --parseDependency --parseInternal
+
+# Verify docs were generated
+RUN test -f docs/docs.go && test -f docs/swagger.json
+
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags='-w -s -extldflags "-static"' \

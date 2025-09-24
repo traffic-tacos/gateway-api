@@ -12,7 +12,7 @@ import (
 	"github.com/traffic-tacos/gateway-api/internal/metrics"
 	"github.com/traffic-tacos/gateway-api/internal/middleware"
 	"github.com/traffic-tacos/gateway-api/internal/routes"
-	// _ "github.com/traffic-tacos/gateway-api/docs" // Swagger docs - temporarily disabled for Docker build
+	_ "github.com/traffic-tacos/gateway-api/docs" // Swagger docs
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
