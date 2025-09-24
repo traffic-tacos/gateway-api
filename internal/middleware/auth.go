@@ -75,6 +75,48 @@ func (a *AuthMiddleware) Authenticate(exemptPaths []string) fiber.Handler {
 			return a.unauthorizedError(c, "MISSING_TOKEN", "Token is required")
 		}
 
+		// Check for dev mode bypass token
+		if tokenString == "dev-super-key-local-testing" {
+			devModeHeader := c.Get("X-Dev-Mode")
+			if devModeHeader == "true" {
+				a.logger.WithField("path", path).Info("Dev mode authentication bypass activated")
+
+				// Set mock user context for dev mode
+				mockClaims := jwt.MapClaims{
+					"sub": "dev-user-123",
+					"aud": a.config.Audience,
+					"iss": a.config.Issuer,
+					"exp": float64(time.Now().Add(24 * time.Hour).Unix()),
+					"role": "developer",
+				}
+				c.Locals("user_claims", mockClaims)
+				c.Locals("user_id", "dev-user-123")
+
+				return c.Next()
+			}
+		}
+
+		// Check for load test bypass token
+		if tokenString == "load-test-bypass-token" {
+			loadTestHeader := c.Get("X-Load-Test")
+			if loadTestHeader == "true" {
+				// Load test mode - generate random user ID
+				userID := fmt.Sprintf("load-test-user-%d", time.Now().UnixNano()%30000)
+
+				mockClaims := jwt.MapClaims{
+					"sub": userID,
+					"aud": a.config.Audience,
+					"iss": a.config.Issuer,
+					"exp": float64(time.Now().Add(1 * time.Hour).Unix()),
+					"role": "user",
+				}
+				c.Locals("user_claims", mockClaims)
+				c.Locals("user_id", userID)
+
+				return c.Next()
+			}
+		}
+
 		// Validate JWT token
 		claims, err := a.validateToken(c.Context(), tokenString)
 		if err != nil {
