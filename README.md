@@ -4,6 +4,8 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
 
 ## Recent Updates
 
+- ✅ **Distributed Tracing Support**: Added `X-Trace-Id` header support for enhanced observability and request tracking
+- ✅ **Development Authentication**: Implemented super auth bypass tokens for streamlined local development and load testing
 - ✅ **gRPC Integration**: Successfully migrated to proto-contracts Go module for backend communication
 - ✅ **Hybrid Architecture**: REST API frontend with gRPC backend communication for optimal performance
 - ✅ **Proto Contracts**: Integrated Traffic Tacos proto-contracts for type-safe inter-service communication
@@ -14,14 +16,15 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
 ## Features
 
 - **High Performance**: Built with Go and Fiber framework for handling 30k RPS
-- **JWT Authentication**: JWKS-based token validation with Redis caching
+- **JWT Authentication**: JWKS-based token validation with Redis caching and development bypass tokens
 - **Rate Limiting**: Token bucket algorithm with Redis backend
 - **Idempotency**: Request deduplication with conflict detection
-- **Observability**: Prometheus metrics, OpenTelemetry tracing, structured logging
+- **Observability**: Prometheus metrics, OpenTelemetry tracing with X-Trace-Id support, structured logging
 - **Queue Management**: Virtual queuing system for traffic control
 - **Backend Integration**: gRPC-based communication with reservation, inventory, and payment services
 - **Proto Contracts**: Type-safe service communication using Traffic Tacos proto-contracts module
 - **AWS Integration**: ElastiCache Redis with Secrets Manager for production deployment
+- **Development Tools**: Super auth bypass tokens for local development and load testing
 
 ## Architecture
 
@@ -294,6 +297,31 @@ Authorization: Bearer <jwt-token>
 - **JWKS-based verification**: Dynamic key fetching and caching
 - **Standard claims validation**: `iss`, `aud`, `exp`, `nbf`
 - **Redis caching**: JWK sets cached for 10 minutes
+- **Development bypass**: Super auth tokens for local development and load testing
+
+### Development Authentication
+
+For local development and load testing, special bypass tokens are available:
+
+#### Development Mode
+```http
+Authorization: Bearer dev-super-key-local-testing
+X-Dev-Mode: true
+```
+- **User ID**: `dev-user-123`
+- **Role**: `developer`
+- **Valid for**: 24 hours
+- **Use case**: Local development and debugging
+
+#### Load Testing Mode
+```http
+Authorization: Bearer load-test-bypass-token
+X-Load-Test: true
+```
+- **User ID**: Random `load-test-user-{id}` (1-30000)
+- **Role**: `user`
+- **Valid for**: 1 hour
+- **Use case**: Performance testing and load simulation
 
 ### Exempt Endpoints
 
@@ -319,6 +347,16 @@ X-RateLimit-Limit: 50
 X-RateLimit-Remaining: 42
 X-RateLimit-Reset: 1642678800
 Retry-After: 1
+```
+
+### CORS Support
+
+The API supports cross-origin requests with the following headers:
+
+```http
+X-Trace-Id: your-trace-id-here
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+Authorization: Bearer <jwt-token>
 ```
 
 ## Idempotency
@@ -355,10 +393,11 @@ Prometheus metrics available at `/metrics`:
 
 OpenTelemetry tracing with:
 
-- **Distributed tracing**: Across all service calls
+- **Distributed tracing**: Across all service calls with X-Trace-Id header support
 - **Automatic instrumentation**: HTTP requests and responses
 - **Custom spans**: Business logic tracing
-- **Context propagation**: W3C trace context headers
+- **Context propagation**: W3C trace context headers and custom X-Trace-Id headers
+- **Cross-service correlation**: Trace IDs propagated between gateway and backend services
 
 ### Logging
 
