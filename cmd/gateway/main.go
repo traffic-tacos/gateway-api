@@ -99,7 +99,7 @@ func main() {
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.CORS.AllowOrigins,
 		AllowMethods:     "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
-		AllowHeaders:     "Origin,Content-Type,Accept,Authorization,X-Requested-With,Idempotency-Key,X-Trace-Id",
+		AllowHeaders:     "Origin,Content-Type,Accept,Authorization,X-Requested-With,Idempotency-Key,X-Trace-Id,X-Dev-Mode",
 		AllowCredentials: true,
 		MaxAge:           86400,
 	}))

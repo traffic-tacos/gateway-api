@@ -75,7 +75,7 @@ generate:
 # Generate Swagger documentation
 swagger:
 	@echo "Generating Swagger documentation..."
-	swag init -g cmd/gateway/main.go -o docs
+	$(shell go env GOPATH)/bin/swag init -g cmd/gateway/main.go -o docs
 	@echo "Swagger documentation generated in docs/ directory"
 
 # Check dependencies for vulnerabilities

@@ -45,209 +45,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/payment/intent": {
-            "post": {
-                "security": [
-                    {
-                        "Bearer": []
-                    }
-                ],
-                "description": "Create a payment intent for a reservation",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "Payments"
-                ],
-                "summary": "Create payment intent",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Idempotency key (UUID v4)",
-                        "name": "Idempotency-Key",
-                        "in": "header",
-                        "required": true
-                    },
-                    {
-                        "description": "Payment intent request",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/clients.CreatePaymentIntentRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/clients.PaymentIntentResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad request",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "500": {
-                        "description": "Internal error",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    }
-                }
-            }
-        },
-        "/payment/process": {
-            "post": {
-                "security": [
-                    {
-                        "Bearer": []
-                    }
-                ],
-                "description": "Manually trigger payment processing for testing purposes",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "Payments"
-                ],
-                "summary": "Process payment (Testing)",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Idempotency key (UUID v4)",
-                        "name": "Idempotency-Key",
-                        "in": "header"
-                    },
-                    {
-                        "description": "Process payment request",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/clients.ProcessPaymentRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "Success",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "400": {
-                        "description": "Bad request",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "404": {
-                        "description": "Not found",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "500": {
-                        "description": "Internal error",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    }
-                }
-            }
-        },
-        "/payment/{id}/status": {
-            "get": {
-                "security": [
-                    {
-                        "Bearer": []
-                    }
-                ],
-                "description": "Retrieve the status of a payment intent",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "Payments"
-                ],
-                "summary": "Get payment status",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Payment Intent ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/clients.PaymentStatusResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad request",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "404": {
-                        "description": "Not found",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "500": {
-                        "description": "Internal error",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    }
-                }
-            }
-        },
         "/queue/enter": {
             "post": {
                 "description": "Request entrance to the main system after waiting in queue",
@@ -473,80 +270,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/reservations": {
-            "post": {
-                "security": [
-                    {
-                        "Bearer": []
-                    }
-                ],
-                "description": "Create a new ticket reservation for an event",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "Reservations"
-                ],
-                "summary": "Create a new reservation",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Idempotency key (UUID v4)",
-                        "name": "Idempotency-Key",
-                        "in": "header",
-                        "required": true
-                    },
-                    {
-                        "description": "Reservation request",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/clients.CreateReservationRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "description": "Created",
-                        "schema": {
-                            "$ref": "#/definitions/clients.ReservationResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad request",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "409": {
-                        "description": "Conflict",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "500": {
-                        "description": "Internal error",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    }
-                }
-            }
-        },
         "/reservations/{id}": {
             "get": {
                 "security": [
@@ -575,7 +298,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/clients.ReservationResponse"
+                            "$ref": "#/definitions/routes.ReservationResponse"
                         }
                     },
                     "400": {
@@ -685,92 +408,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/reservations/{id}/confirm": {
-            "post": {
-                "security": [
-                    {
-                        "Bearer": []
-                    }
-                ],
-                "description": "Confirm a reservation after payment approval",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "Reservations"
-                ],
-                "summary": "Confirm a reservation",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Idempotency key (UUID v4)",
-                        "name": "Idempotency-Key",
-                        "in": "header"
-                    },
-                    {
-                        "type": "string",
-                        "description": "Reservation ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "Confirmation request",
-                        "name": "request",
-                        "in": "body",
-                        "schema": {
-                            "$ref": "#/definitions/clients.ConfirmReservationRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/clients.ConfirmReservationResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad request",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "404": {
-                        "description": "Not found",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "412": {
-                        "description": "Payment not approved",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "500": {
-                        "description": "Internal error",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    }
-                }
-            }
-        },
         "/version": {
             "get": {
                 "description": "Get service version and build information",
@@ -794,168 +431,6 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "clients.ConfirmReservationRequest": {
-            "type": "object",
-            "properties": {
-                "payment_intent_id": {
-                    "type": "string"
-                }
-            }
-        },
-        "clients.ConfirmReservationResponse": {
-            "type": "object",
-            "properties": {
-                "order_id": {
-                    "type": "string"
-                },
-                "status": {
-                    "type": "string"
-                }
-            }
-        },
-        "clients.CreatePaymentIntentRequest": {
-            "type": "object",
-            "properties": {
-                "amount": {
-                    "type": "integer"
-                },
-                "currency": {
-                    "type": "string"
-                },
-                "reservation_id": {
-                    "type": "string"
-                },
-                "scenario": {
-                    "description": "approve|fail|delay|random",
-                    "type": "string"
-                }
-            }
-        },
-        "clients.CreateReservationRequest": {
-            "type": "object",
-            "properties": {
-                "event_id": {
-                    "type": "string"
-                },
-                "quantity": {
-                    "type": "integer"
-                },
-                "reservation_token": {
-                    "type": "string"
-                },
-                "seat_ids": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "user_id": {
-                    "type": "string"
-                }
-            }
-        },
-        "clients.PaymentIntentResponse": {
-            "type": "object",
-            "properties": {
-                "amount": {
-                    "type": "integer"
-                },
-                "created_at": {
-                    "type": "string"
-                },
-                "currency": {
-                    "type": "string"
-                },
-                "next": {
-                    "type": "string"
-                },
-                "payment_intent_id": {
-                    "type": "string"
-                },
-                "reservation_id": {
-                    "type": "string"
-                },
-                "status": {
-                    "type": "string"
-                }
-            }
-        },
-        "clients.PaymentStatusResponse": {
-            "type": "object",
-            "properties": {
-                "amount": {
-                    "type": "integer"
-                },
-                "created_at": {
-                    "type": "string"
-                },
-                "currency": {
-                    "type": "string"
-                },
-                "payment_intent_id": {
-                    "type": "string"
-                },
-                "processed_at": {
-                    "type": "string"
-                },
-                "reservation_id": {
-                    "type": "string"
-                },
-                "status": {
-                    "type": "string"
-                },
-                "updated_at": {
-                    "type": "string"
-                }
-            }
-        },
-        "clients.ProcessPaymentRequest": {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "description": "approve|fail",
-                    "type": "string"
-                },
-                "payment_intent_id": {
-                    "type": "string"
-                }
-            }
-        },
-        "clients.ReservationResponse": {
-            "type": "object",
-            "properties": {
-                "created_at": {
-                    "type": "string"
-                },
-                "event_id": {
-                    "type": "string"
-                },
-                "hold_expires_at": {
-                    "type": "string"
-                },
-                "quantity": {
-                    "type": "integer"
-                },
-                "reservation_id": {
-                    "type": "string"
-                },
-                "seat_ids": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "status": {
-                    "type": "string"
-                },
-                "updated_at": {
-                    "type": "string"
-                },
-                "user_id": {
-                    "type": "string"
-                }
-            }
-        },
         "routes.EnterQueueRequest": {
             "type": "object",
             "required": [
@@ -1028,6 +503,32 @@ const docTemplate = `{
                 "waiting_time": {
                     "description": "Time already waited in seconds",
                     "type": "integer"
+                }
+            }
+        },
+        "routes.ReservationResponse": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string"
+                },
+                "quantity": {
+                    "type": "integer"
+                },
+                "reservation_id": {
+                    "type": "string"
+                },
+                "seat_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "status": {
+                    "type": "string"
+                },
+                "user_id": {
+                    "type": "string"
                 }
             }
         }

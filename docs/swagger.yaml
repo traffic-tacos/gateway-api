@@ -1,111 +1,5 @@
 basePath: /api/v1
 definitions:
-  clients.ConfirmReservationRequest:
-    properties:
-      payment_intent_id:
-        type: string
-    type: object
-  clients.ConfirmReservationResponse:
-    properties:
-      order_id:
-        type: string
-      status:
-        type: string
-    type: object
-  clients.CreatePaymentIntentRequest:
-    properties:
-      amount:
-        type: integer
-      currency:
-        type: string
-      reservation_id:
-        type: string
-      scenario:
-        description: approve|fail|delay|random
-        type: string
-    type: object
-  clients.CreateReservationRequest:
-    properties:
-      event_id:
-        type: string
-      quantity:
-        type: integer
-      reservation_token:
-        type: string
-      seat_ids:
-        items:
-          type: string
-        type: array
-      user_id:
-        type: string
-    type: object
-  clients.PaymentIntentResponse:
-    properties:
-      amount:
-        type: integer
-      created_at:
-        type: string
-      currency:
-        type: string
-      next:
-        type: string
-      payment_intent_id:
-        type: string
-      reservation_id:
-        type: string
-      status:
-        type: string
-    type: object
-  clients.PaymentStatusResponse:
-    properties:
-      amount:
-        type: integer
-      created_at:
-        type: string
-      currency:
-        type: string
-      payment_intent_id:
-        type: string
-      processed_at:
-        type: string
-      reservation_id:
-        type: string
-      status:
-        type: string
-      updated_at:
-        type: string
-    type: object
-  clients.ProcessPaymentRequest:
-    properties:
-      action:
-        description: approve|fail
-        type: string
-      payment_intent_id:
-        type: string
-    type: object
-  clients.ReservationResponse:
-    properties:
-      created_at:
-        type: string
-      event_id:
-        type: string
-      hold_expires_at:
-        type: string
-      quantity:
-        type: integer
-      reservation_id:
-        type: string
-      seat_ids:
-        items:
-          type: string
-        type: array
-      status:
-        type: string
-      updated_at:
-        type: string
-      user_id:
-        type: string
-    type: object
   routes.EnterQueueRequest:
     properties:
       waiting_token:
@@ -156,6 +50,23 @@ definitions:
         description: Time already waited in seconds
         type: integer
     type: object
+  routes.ReservationResponse:
+    properties:
+      event_id:
+        type: string
+      quantity:
+        type: integer
+      reservation_id:
+        type: string
+      seat_ids:
+        items:
+          type: string
+        type: array
+      status:
+        type: string
+      user_id:
+        type: string
+    type: object
 host: localhost:8000
 info:
   contact:
@@ -184,140 +95,6 @@ paths:
       summary: Health check
       tags:
       - System
-  /payment/{id}/status:
-    get:
-      description: Retrieve the status of a payment intent
-      parameters:
-      - description: Payment Intent ID
-        in: path
-        name: id
-        required: true
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/clients.PaymentStatusResponse'
-        "400":
-          description: Bad request
-          schema:
-            additionalProperties: true
-            type: object
-        "401":
-          description: Unauthorized
-          schema:
-            additionalProperties: true
-            type: object
-        "404":
-          description: Not found
-          schema:
-            additionalProperties: true
-            type: object
-        "500":
-          description: Internal error
-          schema:
-            additionalProperties: true
-            type: object
-      security:
-      - Bearer: []
-      summary: Get payment status
-      tags:
-      - Payments
-  /payment/intent:
-    post:
-      consumes:
-      - application/json
-      description: Create a payment intent for a reservation
-      parameters:
-      - description: Idempotency key (UUID v4)
-        in: header
-        name: Idempotency-Key
-        required: true
-        type: string
-      - description: Payment intent request
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/clients.CreatePaymentIntentRequest'
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/clients.PaymentIntentResponse'
-        "400":
-          description: Bad request
-          schema:
-            additionalProperties: true
-            type: object
-        "401":
-          description: Unauthorized
-          schema:
-            additionalProperties: true
-            type: object
-        "500":
-          description: Internal error
-          schema:
-            additionalProperties: true
-            type: object
-      security:
-      - Bearer: []
-      summary: Create payment intent
-      tags:
-      - Payments
-  /payment/process:
-    post:
-      consumes:
-      - application/json
-      description: Manually trigger payment processing for testing purposes
-      parameters:
-      - description: Idempotency key (UUID v4)
-        in: header
-        name: Idempotency-Key
-        type: string
-      - description: Process payment request
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/clients.ProcessPaymentRequest'
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: Success
-          schema:
-            additionalProperties: true
-            type: object
-        "400":
-          description: Bad request
-          schema:
-            additionalProperties: true
-            type: object
-        "401":
-          description: Unauthorized
-          schema:
-            additionalProperties: true
-            type: object
-        "404":
-          description: Not found
-          schema:
-            additionalProperties: true
-            type: object
-        "500":
-          description: Internal error
-          schema:
-            additionalProperties: true
-            type: object
-      security:
-      - Bearer: []
-      summary: Process payment (Testing)
-      tags:
-      - Payments
   /queue/enter:
     post:
       consumes:
@@ -470,55 +247,6 @@ paths:
       summary: Readiness check
       tags:
       - System
-  /reservations:
-    post:
-      consumes:
-      - application/json
-      description: Create a new ticket reservation for an event
-      parameters:
-      - description: Idempotency key (UUID v4)
-        in: header
-        name: Idempotency-Key
-        required: true
-        type: string
-      - description: Reservation request
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/clients.CreateReservationRequest'
-      produces:
-      - application/json
-      responses:
-        "201":
-          description: Created
-          schema:
-            $ref: '#/definitions/clients.ReservationResponse'
-        "400":
-          description: Bad request
-          schema:
-            additionalProperties: true
-            type: object
-        "401":
-          description: Unauthorized
-          schema:
-            additionalProperties: true
-            type: object
-        "409":
-          description: Conflict
-          schema:
-            additionalProperties: true
-            type: object
-        "500":
-          description: Internal error
-          schema:
-            additionalProperties: true
-            type: object
-      security:
-      - Bearer: []
-      summary: Create a new reservation
-      tags:
-      - Reservations
   /reservations/{id}:
     get:
       description: Retrieve details of a specific reservation
@@ -534,7 +262,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/clients.ReservationResponse'
+            $ref: '#/definitions/routes.ReservationResponse'
         "400":
           description: Bad request
           schema:
@@ -609,63 +337,6 @@ paths:
       security:
       - Bearer: []
       summary: Cancel a reservation
-      tags:
-      - Reservations
-  /reservations/{id}/confirm:
-    post:
-      consumes:
-      - application/json
-      description: Confirm a reservation after payment approval
-      parameters:
-      - description: Idempotency key (UUID v4)
-        in: header
-        name: Idempotency-Key
-        type: string
-      - description: Reservation ID
-        in: path
-        name: id
-        required: true
-        type: string
-      - description: Confirmation request
-        in: body
-        name: request
-        schema:
-          $ref: '#/definitions/clients.ConfirmReservationRequest'
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/clients.ConfirmReservationResponse'
-        "400":
-          description: Bad request
-          schema:
-            additionalProperties: true
-            type: object
-        "401":
-          description: Unauthorized
-          schema:
-            additionalProperties: true
-            type: object
-        "404":
-          description: Not found
-          schema:
-            additionalProperties: true
-            type: object
-        "412":
-          description: Payment not approved
-          schema:
-            additionalProperties: true
-            type: object
-        "500":
-          description: Internal error
-          schema:
-            additionalProperties: true
-            type: object
-      security:
-      - Bearer: []
-      summary: Confirm a reservation
       tags:
       - Reservations
   /version:
