@@ -6,9 +6,9 @@ on:
   workflow_dispatch: {}
 
 env:
-  AWS_REGION: ap-southeast-2
-  CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
-  ECR_REPO: ${{ secrets.ECR_BASE_REPO }}/traffic-tacos-gateway-api
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+  ECR_REPO: ${{ vars.ECR_BASE_REPO }}/traffic-tacos-gateway-api
 
 jobs:
   deploy:
