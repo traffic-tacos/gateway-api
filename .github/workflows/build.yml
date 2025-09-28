@@ -8,7 +8,7 @@ on:
 env:
   AWS_REGION: ap-southeast-2
   CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
-  ECR_REPO: ${{ secrets.ECR_BASE_REPO }}/gateway-api
+  ECR_REPO: ${{ secrets.ECR_BASE_REPO }}/traffic-tacos-gateway-api
 
 jobs:
   deploy:
