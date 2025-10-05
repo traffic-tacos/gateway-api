@@ -468,29 +468,54 @@ func (q *QueueHandler) calculatePositionAndETA(ctx context.Context, queueData *Q
 }
 
 func (q *QueueHandler) isEligibleForEntry(ctx context.Context, queueData *QueueData, waitingToken string) bool {
-	// 1. Minimum wait time check (5 seconds)
-	waitTime := time.Since(queueData.JoinedAt)
-	if waitTime < 5*time.Second {
+	// 1. Get current position first
+	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+	rank, err := q.redisClient.ZRank(ctx, eventQueueKey, waitingToken).Result()
+	if err != nil {
 		q.logger.WithFields(logrus.Fields{
 			"waiting_token": waitingToken,
-			"wait_time":     waitTime.Seconds(),
-		}).Debug("Not eligible: minimum wait time not met")
+			"error":         err,
+		}).Debug("Not eligible: failed to get rank")
 		return false
 	}
 
-	// 2. Queue position check (top 100 only)
-	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
-	rank, err := q.redisClient.ZRank(ctx, eventQueueKey, waitingToken).Result()
-	if err != nil || int(rank) >= 100 {
+	position := int(rank) + 1
+
+	// 2. Position check (top 100 only)
+	if position > 100 {
 		q.logger.WithFields(logrus.Fields{
 			"waiting_token": waitingToken,
-			"rank":          rank,
-			"error":         err,
+			"position":      position,
 		}).Debug("Not eligible: not in top 100 positions")
 		return false
 	}
 
-	// 3. Token Bucket check (rate limiting)
+	// 3. Dynamic minimum wait time based on position
+	// - Position 1-10: 0 seconds (immediate entry)
+	// - Position 11-50: 2 seconds
+	// - Position 51-100: 5 seconds
+	waitTime := time.Since(queueData.JoinedAt)
+	var minWaitTime time.Duration
+
+	if position <= 10 {
+		minWaitTime = 0 * time.Second // Top 10: immediate entry! 🎉
+	} else if position <= 50 {
+		minWaitTime = 2 * time.Second
+	} else {
+		minWaitTime = 5 * time.Second
+	}
+
+	if waitTime < minWaitTime {
+		q.logger.WithFields(logrus.Fields{
+			"waiting_token":  waitingToken,
+			"position":       position,
+			"wait_time":      waitTime.Seconds(),
+			"min_wait_time":  minWaitTime.Seconds(),
+		}).Debug("Not eligible: minimum wait time not met")
+		return false
+	}
+
+	// 4. Token Bucket check (rate limiting)
 	bucket := queue.NewTokenBucketAdmission(q.redisClient, queueData.EventID, q.logger)
 	admitted, err := bucket.TryAdmit(ctx, queueData.UserID)
 
@@ -501,7 +526,9 @@ func (q *QueueHandler) isEligibleForEntry(ctx context.Context, queueData *QueueD
 
 	q.logger.WithFields(logrus.Fields{
 		"waiting_token": waitingToken,
-		"rank":          rank,
+		"position":      position,
+		"wait_time":     waitTime.Seconds(),
+		"min_wait_time": minWaitTime.Seconds(),
 		"admitted":      admitted,
 	}).Info("Eligibility check completed")
 
