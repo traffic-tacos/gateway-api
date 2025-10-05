@@ -39,15 +39,12 @@ func TestStreamQueue_PerUserFIFO(t *testing.T) {
 	}()
 
 	// Test: Enqueue 5 messages from same user
-	var results []*EnqueueResult
 	for i := 0; i < 5; i++ {
 		token := fmt.Sprintf("token-%d", i)
 		result, err := sq.Enqueue(ctx, eventID, userID, token)
 
 		require.NoError(t, err)
 		require.NotNil(t, result)
-
-		results = append(results, result)
 
 		// Each message should have increasing position within user's stream
 		assert.Equal(t, i+1, result.UserPos)

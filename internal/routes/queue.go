@@ -402,15 +402,6 @@ func (q *QueueHandler) getQueueData(ctx context.Context, waitingToken string) (*
 	return &queueData, nil
 }
 
-func (q *QueueHandler) getNextQueuePosition(ctx context.Context, eventID string) (int, error) {
-	eventQueueKey := fmt.Sprintf("queue:event:%s", eventID)
-	count, err := q.redisClient.ZCard(ctx, eventQueueKey).Result()
-	if err != nil {
-		return 0, err
-	}
-	return int(count) + 1, nil
-}
-
 func (q *QueueHandler) calculatePositionAndETA(ctx context.Context, queueData *QueueData, waitingToken string) (int, int) {
 	// Try to get position from Stream first (new approach)
 	streamKey := fmt.Sprintf("stream:event:{%s}:user:%s", queueData.EventID, queueData.UserID)

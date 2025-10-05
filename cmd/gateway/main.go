@@ -120,7 +120,9 @@ func main() {
 	go func() {
 		<-c
 		logger.Info("Gracefully shutting down...")
-		app.Shutdown()
+		if err := app.Shutdown(); err != nil {
+			logger.WithError(err).Error("Server shutdown failed")
+		}
 	}()
 
 	// Start server
