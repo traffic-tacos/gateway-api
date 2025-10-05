@@ -179,6 +179,10 @@ func (q *QueueHandler) Join(c *fiber.Ctx) error {
 		q.logger.WithError(err).Warn("Failed to add to ZSET queue")
 	}
 
+	// Set TTL on ZSET to prevent memory leak (if user abandons without calling Leave)
+	// TTL = 1 hour (longer than waiting_token TTL to allow for grace period)
+	q.redisClient.Expire(ctx, eventQueueKey, 1*time.Hour)
+
 	q.logger.WithFields(logrus.Fields{
 		"waiting_token": waitingToken,
 		"stream_id":     result.StreamID,

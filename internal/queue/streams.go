@@ -64,6 +64,10 @@ func (sq *StreamQueue) Enqueue(
 		return nil, fmt.Errorf("xadd failed: %w", err)
 	}
 
+	// Set TTL on stream to prevent memory leak (if user abandons without calling Leave)
+	// TTL = 1 hour to match ZSET expiration
+	sq.redis.Expire(ctx, streamKey, 1*time.Hour)
+
 	// Get user's position in their own stream
 	userPos, err := sq.redis.XLen(ctx, streamKey).Result()
 	if err != nil {

@@ -7,12 +7,12 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/traffic-tacos/gateway-api/docs" // Swagger docs
 	"github.com/traffic-tacos/gateway-api/internal/config"
 	"github.com/traffic-tacos/gateway-api/internal/logging"
 	"github.com/traffic-tacos/gateway-api/internal/metrics"
 	"github.com/traffic-tacos/gateway-api/internal/middleware"
 	"github.com/traffic-tacos/gateway-api/internal/routes"
-	_ "github.com/traffic-tacos/gateway-api/docs" // Swagger docs
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
