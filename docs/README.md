@@ -14,11 +14,13 @@ Gateway API의 전체 문서 인덱스입니다. 30k RPS를 견디는 Cloud Nati
 |---|---|---|---|
 | **[QUEUE_ALGORITHMS.md](QUEUE_ALGORITHMS.md)** | ETA 계산 및 Admission Control 알고리즘 상세 설명 | 중 | 개발자, 아키텍트 |
 | **[QUEUE_WORKFLOW.md](QUEUE_WORKFLOW.md)** | Redis 기반 대기열 시스템 워크플로우 및 Flow 다이어그램 | 중 | 개발자, 운영팀 |
+| **[HEARTBEAT_MECHANISM.md](HEARTBEAT_MECHANISM.md)** | Heartbeat 기반 자동 이탈 감지 및 정리 시스템 | 중 | 개발자, 운영팀 |
 
 **주요 내용**:
 - **ETA 계산**: Exponential Moving Average (EMA), Sliding Window Counter, Machine Learning
 - **Admission Control**: Token Bucket, Leaky Bucket, Adaptive Rate Limiting
 - **Redis 구조**: ZSet, Streams, Lua Scripts
+- **Heartbeat**: 5분 TTL 기반 자동 이탈 감지 (v1.3.2+)
 - **Flow 다이어그램**: Join → Status → Enter → Admission
 
 ---
