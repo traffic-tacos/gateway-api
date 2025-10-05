@@ -167,13 +167,24 @@ func (q *QueueHandler) Join(c *fiber.Ctx) error {
 		q.logger.WithError(err).Error("Failed to store queue data")
 	}
 
+	// 🔴 CRITICAL FIX: Also add to ZSET for position calculation
+	// This ensures Status API can calculate position even if Stream lookup fails
+	eventQueueKey := fmt.Sprintf("queue:event:%s", req.EventID)
+	score := float64(time.Now().Unix()) // Use timestamp as score for FIFO ordering
+	if err := q.redisClient.ZAdd(ctx, eventQueueKey, redis.Z{
+		Score:  score,
+		Member: waitingToken,
+	}).Err(); err != nil {
+		q.logger.WithError(err).Warn("Failed to add to ZSET queue")
+	}
+
 	q.logger.WithFields(logrus.Fields{
 		"waiting_token": waitingToken,
 		"stream_id":     result.StreamID,
 		"event_id":      req.EventID,
 		"user_id":       req.UserID,
 		"position":      position,
-	}).Info("User joined queue via Lua + Streams")
+	}).Info("User joined queue via Lua + Streams + ZSET")
 
 	return c.Status(fiber.StatusAccepted).JSON(JoinQueueResponse{
 		WaitingToken: waitingToken,
@@ -283,6 +294,18 @@ func (q *QueueHandler) Enter(c *fiber.Ctx) error {
 	queueKey := fmt.Sprintf("queue:waiting:%s", req.WaitingToken)
 	q.redisClient.Set(ctx, queueKey, queueDataBytes, 30*time.Minute)
 
+	// 🔴 CRITICAL FIX: Remove from ZSET to update position for other users
+	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+	if err := q.redisClient.ZRem(ctx, eventQueueKey, req.WaitingToken).Err(); err != nil {
+		q.logger.WithError(err).Warn("Failed to remove from ZSET queue")
+	}
+
+	// 🔴 CRITICAL FIX: Mark as processed in Stream (or trim)
+	streamKey := fmt.Sprintf("stream:event:{%s}:user:%s", queueData.EventID, queueData.UserID)
+	// Note: We keep stream for audit trail, but mark it by removing from active calculation
+	// Alternatively, we could XTRIM or XDEL here
+	_ = streamKey // Keep for now, ZSET removal is sufficient
+
 	// Record admission for metrics tracking
 	metrics := queue.NewAdmissionMetrics(q.redisClient, queueData.EventID, q.logger)
 	if err := metrics.RecordAdmission(ctx, queueData.UserID); err != nil {
@@ -320,22 +343,37 @@ func (q *QueueHandler) Leave(c *fiber.Ctx) error {
 
 	ctx := context.Background()
 
+	// Get queue data first (before deletion)
+	queueData, err := q.getQueueData(ctx, waitingToken)
+
 	// Remove from waiting queue
 	queueKey := fmt.Sprintf("queue:waiting:%s", waitingToken)
 	if err := q.redisClient.Del(ctx, queueKey).Err(); err != nil {
 		q.logger.WithError(err).Error("Failed to remove from waiting queue")
 	}
 
-	// Get queue data to remove from event queue
-	queueData, err := q.getQueueData(ctx, waitingToken)
+	// Remove from ZSET event queue
 	if err == nil {
 		eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
-		q.redisClient.ZRem(ctx, eventQueueKey, waitingToken)
+		if err := q.redisClient.ZRem(ctx, eventQueueKey, waitingToken).Err(); err != nil {
+			q.logger.WithError(err).Warn("Failed to remove from ZSET queue")
+		}
+
+		// 🔴 CRITICAL FIX: Also clean up Stream entries
+		streamKey := fmt.Sprintf("stream:event:{%s}:user:%s", queueData.EventID, queueData.UserID)
+		// Get all entries for this user and delete the matching one
+		entries, _ := q.redisClient.XRange(ctx, streamKey, "-", "+").Result()
+		for _, entry := range entries {
+			if token, ok := entry.Values["token"].(string); ok && token == waitingToken {
+				q.redisClient.XDel(ctx, streamKey, entry.ID)
+				break
+			}
+		}
 	}
 
 	q.logger.WithFields(logrus.Fields{
 		"waiting_token": waitingToken,
-	}).Info("User left queue")
+	}).Info("User left queue (removed from ZSET and Stream)")
 
 	return c.JSON(fiber.Map{
 		"status": "left",
