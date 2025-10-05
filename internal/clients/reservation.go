@@ -42,11 +42,9 @@ func NewReservationClient(cfg *config.ReservationAPIConfig, logger *logrus.Logge
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	// Add timeout
-	opts = append(opts, grpc.WithTimeout(cfg.Timeout))
-
-	// Create gRPC connection
-	conn, err := grpc.Dial(cfg.GRPCAddress, opts...)
+	// Create gRPC connection (grpc.NewClient replaces deprecated grpc.Dial)
+	// Note: Timeout is handled per-call via context, not at connection level
+	conn, err := grpc.NewClient(cfg.GRPCAddress, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to reservation service: %w", err)
 	}
@@ -179,4 +177,3 @@ func (r *ReservationClient) CancelReservation(ctx context.Context, reservationID
 
 	return resp, nil
 }
-

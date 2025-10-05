@@ -199,7 +199,7 @@ func (le *LuaExecutor) HoldSeatAtomic(
 
 	// Convert string to int64
 	var remaining int64
-	fmt.Sscanf(remainingStr, "%d", &remaining)
+	_, _ = fmt.Sscanf(remainingStr, "%d", &remaining)
 
 	le.logger.WithFields(logrus.Fields{
 		"seat_id":   seatID,
@@ -282,7 +282,7 @@ func (le *LuaExecutor) ReleaseSeatAtomic(
 
 	// Convert string to int64
 	var remaining int64
-	fmt.Sscanf(remainingStr, "%d", &remaining)
+	_, _ = fmt.Sscanf(remainingStr, "%d", &remaining)
 
 	le.logger.WithFields(logrus.Fields{
 		"seat_id":   seatID,

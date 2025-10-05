@@ -507,10 +507,10 @@ func (q *QueueHandler) isEligibleForEntry(ctx context.Context, queueData *QueueD
 
 	if waitTime < minWaitTime {
 		q.logger.WithFields(logrus.Fields{
-			"waiting_token":  waitingToken,
-			"position":       position,
-			"wait_time":      waitTime.Seconds(),
-			"min_wait_time":  minWaitTime.Seconds(),
+			"waiting_token": waitingToken,
+			"position":      position,
+			"wait_time":     waitTime.Seconds(),
+			"min_wait_time": minWaitTime.Seconds(),
 		}).Debug("Not eligible: minimum wait time not met")
 		return false
 	}

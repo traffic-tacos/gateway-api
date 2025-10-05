@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/traffic-tacos/gateway-api/internal/config"
-	paymentv1 "github.com/traffic-tacos/proto-contracts/gen/go/payment/v1"
 	commonv1 "github.com/traffic-tacos/proto-contracts/gen/go/common/v1"
+	paymentv1 "github.com/traffic-tacos/proto-contracts/gen/go/payment/v1"
 
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -35,11 +35,9 @@ func NewPaymentClient(cfg *config.PaymentAPIConfig, logger *logrus.Logger) (*Pay
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	// Add timeout
-	opts = append(opts, grpc.WithTimeout(cfg.Timeout))
-
-	// Create gRPC connection
-	conn, err := grpc.Dial(cfg.GRPCAddress, opts...)
+	// Create gRPC connection (grpc.NewClient replaces deprecated grpc.Dial)
+	// Note: Timeout is handled per-call via context, not at connection level
+	conn, err := grpc.NewClient(cfg.GRPCAddress, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to payment service: %w", err)
 	}
@@ -142,4 +140,3 @@ func (p *PaymentClient) ProcessPayment(ctx context.Context, paymentIntentID stri
 
 	return resp, nil
 }
-

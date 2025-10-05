@@ -328,7 +328,7 @@ func BenchmarkLuaExecutor_EnqueueAtomic(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		dedupeKey := fmt.Sprintf("dedupe:bench-%d", i)
-		executor.EnqueueAtomic(
+		_, _ = executor.EnqueueAtomic(
 			ctx,
 			dedupeKey,
 			streamKey,

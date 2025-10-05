@@ -206,7 +206,7 @@ func TestStreamQueue_Cleanup(t *testing.T) {
 
 	// Enqueue messages
 	for i := 0; i < 5; i++ {
-		sq.Enqueue(ctx, eventID, userID, fmt.Sprintf("token-%d", i))
+		_, _ = sq.Enqueue(ctx, eventID, userID, fmt.Sprintf("token-%d", i))
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -247,7 +247,7 @@ func TestStreamQueue_GlobalPosition(t *testing.T) {
 
 	// User A enqueues 3 messages
 	for i := 0; i < 3; i++ {
-		sq.Enqueue(ctx, eventID, "user-a", fmt.Sprintf("a-token-%d", i))
+		_, _ = sq.Enqueue(ctx, eventID, "user-a", fmt.Sprintf("a-token-%d", i))
 	}
 
 	// User B enqueues 2 messages
@@ -299,6 +299,6 @@ func BenchmarkStreamQueue_Enqueue(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		token := fmt.Sprintf("token-%d", i)
-		sq.Enqueue(ctx, eventID, userID, token)
+		_, _ = sq.Enqueue(ctx, eventID, userID, token)
 	}
 }
