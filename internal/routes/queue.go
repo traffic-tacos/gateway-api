@@ -183,6 +183,15 @@ func (q *QueueHandler) Join(c *fiber.Ctx) error {
 	// TTL = 1 hour (longer than waiting_token TTL to allow for grace period)
 	q.redisClient.Expire(ctx, eventQueueKey, 1*time.Hour)
 
+	// 🔴 NEW: Heartbeat mechanism for auto-removal
+	// Create heartbeat key with 5-minute TTL
+	// Status API will renew this TTL on each call
+	// If TTL expires (no Status calls), user is considered abandoned
+	heartbeatKey := fmt.Sprintf("heartbeat:%s", waitingToken)
+	if err := q.redisClient.Set(ctx, heartbeatKey, "alive", 5*time.Minute).Err(); err != nil {
+		q.logger.WithError(err).Warn("Failed to create heartbeat key")
+	}
+
 	q.logger.WithFields(logrus.Fields{
 		"waiting_token": waitingToken,
 		"stream_id":     result.StreamID,
@@ -215,8 +224,49 @@ func (q *QueueHandler) Status(c *fiber.Ctx) error {
 		return q.badRequestError(c, "MISSING_TOKEN", "waiting token is required")
 	}
 
+	ctx := c.Context()
+
+	// 🔴 NEW: Heartbeat check and renewal
+	// Check if heartbeat key exists (user is still active)
+	heartbeatKey := fmt.Sprintf("heartbeat:%s", waitingToken)
+	exists, err := q.redisClient.Exists(ctx, heartbeatKey).Result()
+	if err != nil {
+		q.logger.WithError(err).Warn("Failed to check heartbeat")
+	} else if exists == 0 {
+		// Heartbeat expired - user abandoned the queue
+		// Clean up and return expired status
+		q.logger.WithField("waiting_token", waitingToken).Info("Heartbeat expired - cleaning up abandoned user")
+
+		// Get queue data first to clean up properly
+		queueData, _ := q.getQueueData(ctx, waitingToken)
+		if queueData != nil {
+			// Remove from ZSET
+			eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+			q.redisClient.ZRem(ctx, eventQueueKey, waitingToken)
+
+			// Remove from Stream
+			streamKey := fmt.Sprintf("stream:event:{%s}:user:%s", queueData.EventID, queueData.UserID)
+			entries, _ := q.redisClient.XRange(ctx, streamKey, "-", "+").Result()
+			for _, entry := range entries {
+				if token, ok := entry.Values["token"].(string); ok && token == waitingToken {
+					q.redisClient.XDel(ctx, streamKey, entry.ID)
+					break
+				}
+			}
+
+			// Remove queue data
+			queueKey := fmt.Sprintf("queue:waiting:%s", waitingToken)
+			q.redisClient.Del(ctx, queueKey)
+		}
+
+		return q.notFoundError(c, "TOKEN_EXPIRED", "Waiting token expired due to inactivity")
+	} else {
+		// Renew heartbeat TTL (user is still active)
+		q.redisClient.Expire(ctx, heartbeatKey, 5*time.Minute)
+	}
+
 	// Get queue data
-	queueData, err := q.getQueueData(c.Context(), waitingToken)
+	queueData, err := q.getQueueData(ctx, waitingToken)
 	if err != nil {
 		if err == redis.Nil {
 			return q.notFoundError(c, "TOKEN_NOT_FOUND", "Waiting token not found or expired")
@@ -303,6 +353,12 @@ func (q *QueueHandler) Enter(c *fiber.Ctx) error {
 	queueKey := fmt.Sprintf("queue:waiting:%s", req.WaitingToken)
 	q.redisClient.Set(ctx, queueKey, queueDataBytes, 30*time.Minute)
 
+	// 🔴 NEW: Remove heartbeat key (user successfully entered, no longer waiting)
+	heartbeatKey := fmt.Sprintf("heartbeat:%s", req.WaitingToken)
+	if err := q.redisClient.Del(ctx, heartbeatKey).Err(); err != nil {
+		q.logger.WithError(err).Warn("Failed to remove heartbeat key")
+	}
+
 	// 🔴 CRITICAL FIX: Remove from ZSET to update position for other users
 	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
 	if err := q.redisClient.ZRem(ctx, eventQueueKey, req.WaitingToken).Err(); err != nil {
@@ -354,6 +410,12 @@ func (q *QueueHandler) Leave(c *fiber.Ctx) error {
 
 	// Get queue data first (before deletion)
 	queueData, err := q.getQueueData(ctx, waitingToken)
+
+	// 🔴 NEW: Remove heartbeat key
+	heartbeatKey := fmt.Sprintf("heartbeat:%s", waitingToken)
+	if err := q.redisClient.Del(ctx, heartbeatKey).Err(); err != nil {
+		q.logger.WithError(err).Warn("Failed to remove heartbeat key")
+	}
 
 	// Remove from waiting queue
 	queueKey := fmt.Sprintf("queue:waiting:%s", waitingToken)
