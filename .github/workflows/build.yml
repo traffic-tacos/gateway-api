@@ -24,6 +24,19 @@ jobs:
   test:
     name: Test & Lint
     runs-on: ubuntu-latest
+    
+    # 🔴 Add Redis service for integration tests
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,7 +53,15 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
+      - name: Wait for Redis
+        run: |
+          echo "Waiting for Redis to be ready..."
+          timeout 30s bash -c 'until redis-cli -h localhost -p 6379 ping; do sleep 1; done'
+          echo "✅ Redis is ready!"
+
       - name: Run tests
+        env:
+          REDIS_ADDR: localhost:6379
         run: |
           if [ -f "Makefile" ] && grep -q "^test:" Makefile; then
             make test
