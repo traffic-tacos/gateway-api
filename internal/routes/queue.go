@@ -516,6 +516,20 @@ func (q *QueueHandler) isEligibleForEntry(ctx context.Context, queueData *QueueD
 	}
 
 	// 4. Token Bucket check (rate limiting)
+	// 🔴 Top 10 users bypass token bucket (VIP treatment)
+	if position <= 10 {
+		q.logger.WithFields(logrus.Fields{
+			"waiting_token": waitingToken,
+			"position":      position,
+			"wait_time":     waitTime.Seconds(),
+			"min_wait_time": minWaitTime.Seconds(),
+			"admitted":      true,
+			"bypass":        "top_10_vip",
+		}).Info("Eligibility check completed - VIP bypass")
+		return true
+	}
+
+	// For position > 10, apply token bucket rate limiting
 	bucket := queue.NewTokenBucketAdmission(q.redisClient, queueData.EventID, q.logger)
 	admitted, err := bucket.TryAdmit(ctx, queueData.UserID)
 
