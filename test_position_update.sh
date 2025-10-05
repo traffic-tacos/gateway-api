@@ -63,6 +63,7 @@ sleep 5 # Wait minimum 5 seconds (eligibility requirement)
 
 ENTER_RESPONSE=$(curl -s -X POST "$BASE_URL/queue/enter" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d "{\"waiting_token\": \"${TOKENS[0]}\"}")
 
 ADMISSION=$(echo $ENTER_RESPONSE | jq -r '.admission')
@@ -91,6 +92,7 @@ sleep 3
 
 ENTER_RESPONSE=$(curl -s -X POST "$BASE_URL/queue/enter" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d "{\"waiting_token\": \"${TOKENS[1]}\"}")
 
 ADMISSION=$(echo $ENTER_RESPONSE | jq -r '.admission')
