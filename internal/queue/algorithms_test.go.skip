@@ -1,0 +1,173 @@
+package queue
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/go-redis/redismock/v9"
+	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestAdmissionMetrics_GetAdmissionRate(t *testing.T) {
+	// Create mock Redis client
+	db, mock := redismock.NewClientMock()
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+
+	metrics := NewAdmissionMetrics(db, "test-event", logger)
+
+	ctx := context.Background()
+	now := time.Now().Unix()
+	oneMinuteAgo := now - 60
+
+	// Mock Redis ZCount response (60 admissions in last minute)
+	mock.ExpectZCount("metrics:admission:test-event",
+		string(rune(oneMinuteAgo)),
+		string(rune(now))).SetVal(60)
+
+	rate, err := metrics.GetAdmissionRate(ctx)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 1.0, rate) // 60 admissions / 60 seconds = 1.0/s
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAdmissionMetrics_CalculateSmartETA(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	logger := logrus.New()
+
+	metrics := NewAdmissionMetrics(db, "test-event", logger)
+
+	ctx := context.Background()
+	now := time.Now().Unix()
+	oneMinuteAgo := now - 60
+
+	tests := []struct {
+		name             string
+		position         int
+		admissionsPerMin int64
+		expectedETARange [2]int // min, max range
+	}{
+		{
+			name:             "High rate (10 per second)",
+			position:         10,
+			admissionsPerMin: 600,          // 10/s
+			expectedETARange: [2]int{1, 2}, // ~1.1s
+		},
+		{
+			name:             "Medium rate (5 per second)",
+			position:         10,
+			admissionsPerMin: 300,          // 5/s
+			expectedETARange: [2]int{2, 3}, // ~2.2s
+		},
+		{
+			name:             "Low rate (1 per second)",
+			position:         10,
+			admissionsPerMin: 60,             // 1/s
+			expectedETARange: [2]int{10, 12}, // ~11s
+		},
+		{
+			name:             "Zero rate (fallback)",
+			position:         10,
+			admissionsPerMin: 0,
+			expectedETARange: [2]int{20, 20}, // fallback: position * 2
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock.ExpectZCount("metrics:admission:test-event",
+				string(rune(oneMinuteAgo)),
+				string(rune(now))).SetVal(tt.admissionsPerMin)
+
+			eta := metrics.CalculateSmartETA(ctx, tt.position)
+
+			assert.GreaterOrEqual(t, eta, tt.expectedETARange[0])
+			assert.LessOrEqual(t, eta, tt.expectedETARange[1])
+		})
+	}
+}
+
+func TestTokenBucketAdmission_TryAdmit(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	logger := logrus.New()
+
+	bucket := NewTokenBucketAdmission(db, "test-event", logger)
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		setupMock      func()
+		expectedResult bool
+	}{
+		{
+			name: "Admission granted (tokens available)",
+			setupMock: func() {
+				// Mock Lua script returning 1 (admitted)
+				mock.ExpectEval(tokenBucketLuaScript).SetVal(int64(1))
+			},
+			expectedResult: true,
+		},
+		{
+			name: "Admission denied (no tokens)",
+			setupMock: func() {
+				// Mock Lua script returning 0 (denied)
+				mock.ExpectEval(tokenBucketLuaScript).SetVal(int64(0))
+			},
+			expectedResult: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.setupMock()
+
+			admitted, err := bucket.TryAdmit(ctx, "test-user")
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedResult, admitted)
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestTokenBucketAdmission_SetCapacityAndRate(t *testing.T) {
+	db, _ := redismock.NewClientMock()
+	logger := logrus.New()
+
+	bucket := NewTokenBucketAdmission(db, "test-event", logger)
+
+	// Test default values
+	assert.Equal(t, 100, bucket.capacity)
+	assert.Equal(t, 10.0, bucket.refillRate)
+
+	// Test setting new values
+	bucket.SetCapacity(200)
+	bucket.SetRefillRate(20.0)
+
+	assert.Equal(t, 200, bucket.capacity)
+	assert.Equal(t, 20.0, bucket.refillRate)
+}
+
+func TestAdmissionMetrics_RecordAdmission(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	logger := logrus.New()
+
+	metrics := NewAdmissionMetrics(db, "test-event", logger)
+
+	ctx := context.Background()
+
+	// Mock ZAdd operation
+	mock.ExpectZAdd("metrics:admission:test-event", gomock.Any()).SetVal(1)
+
+	// Mock ZRemRangeByScore for cleanup
+	mock.ExpectZRemRangeByScore("metrics:admission:test-event", "-inf", gomock.Any()).SetVal(0)
+
+	err := metrics.RecordAdmission(ctx, "test-user")
+
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}

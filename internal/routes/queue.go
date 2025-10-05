@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/traffic-tacos/gateway-api/internal/middleware"
+	"github.com/traffic-tacos/gateway-api/internal/queue"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -17,6 +18,8 @@ import (
 type QueueHandler struct {
 	redisClient *redis.Client
 	logger      *logrus.Logger
+	luaExecutor *queue.LuaExecutor
+	streamQueue *queue.StreamQueue
 }
 
 type JoinQueueRequest struct {
@@ -25,9 +28,9 @@ type JoinQueueRequest struct {
 }
 
 type QueueStatusResponse struct {
-	Status      string `json:"status"`      // waiting|ready|expired
-	Position    int    `json:"position"`    // Current position in queue
-	ETASeconds  int    `json:"eta_sec"`     // Estimated time to admission
+	Status      string `json:"status"`       // waiting|ready|expired
+	Position    int    `json:"position"`     // Current position in queue
+	ETASeconds  int    `json:"eta_sec"`      // Estimated time to admission
 	WaitingTime int    `json:"waiting_time"` // Time already waited in seconds
 }
 
@@ -42,23 +45,25 @@ type EnterQueueRequest struct {
 }
 
 type EnterQueueResponse struct {
-	Admission        string `json:"admission"`         // granted|denied
+	Admission        string `json:"admission"` // granted|denied
 	ReservationToken string `json:"reservation_token,omitempty"`
 	TTLSeconds       int    `json:"ttl_sec,omitempty"`
 }
 
 type QueueData struct {
-	EventID     string    `json:"event_id"`
-	UserID      string    `json:"user_id,omitempty"`
-	JoinedAt    time.Time `json:"joined_at"`
-	Position    int       `json:"position"`
-	Status      string    `json:"status"` // waiting|ready|expired
+	EventID  string    `json:"event_id"`
+	UserID   string    `json:"user_id,omitempty"`
+	JoinedAt time.Time `json:"joined_at"`
+	Position int       `json:"position"`
+	Status   string    `json:"status"` // waiting|ready|expired
 }
 
 func NewQueueHandler(redisClient *redis.Client, logger *logrus.Logger) *QueueHandler {
 	return &QueueHandler{
 		redisClient: redisClient,
 		logger:      logger,
+		luaExecutor: queue.NewLuaExecutor(redisClient, logger),
+		streamQueue: queue.NewStreamQueue(redisClient, logger),
 	}
 }
 
@@ -91,7 +96,54 @@ func (q *QueueHandler) Join(c *fiber.Ctx) error {
 	// Generate waiting token
 	waitingToken := uuid.New().String()
 
-	// Create queue data
+	// Generate idempotency key (request-based or user-based)
+	idempotencyKey := c.Get("Idempotency-Key")
+	if idempotencyKey == "" {
+		// Fallback: use user_id + event_id + short time window
+		idempotencyKey = fmt.Sprintf("%s:%s:%d", req.UserID, req.EventID, time.Now().Unix()/10)
+	}
+
+	ctx := context.Background()
+
+	// Atomic enqueue with deduplication using Lua Script
+	dedupeKey := fmt.Sprintf("dedupe:%s", idempotencyKey)
+	streamKey := fmt.Sprintf("stream:event:{%s}:user:%s", req.EventID, req.UserID)
+
+	result, err := q.luaExecutor.EnqueueAtomic(
+		ctx,
+		dedupeKey,
+		streamKey,
+		waitingToken,
+		req.EventID,
+		req.UserID,
+		300, // TTL: 5 minutes
+	)
+
+	if err != nil {
+		q.logger.WithError(err).WithFields(logrus.Fields{
+			"event_id": req.EventID,
+			"user_id":  req.UserID,
+		}).Error("Failed to enqueue atomically")
+		return q.internalError(c, "QUEUE_ERROR", "Failed to join queue")
+	}
+
+	// Check for duplicate
+	if result.Error == "DUPLICATE" {
+		q.logger.WithFields(logrus.Fields{
+			"idempotency_key": idempotencyKey,
+			"event_id":        req.EventID,
+			"user_id":         req.UserID,
+		}).Warn("Duplicate join request detected")
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error": fiber.Map{
+				"code":     "DUPLICATE_REQUEST",
+				"message":  "This request has already been processed",
+				"trace_id": c.Get("X-Request-ID"),
+			},
+		})
+	}
+
+	// Create queue data for backward compatibility
 	queueData := QueueData{
 		EventID:  req.EventID,
 		UserID:   req.UserID,
@@ -99,40 +151,29 @@ func (q *QueueHandler) Join(c *fiber.Ctx) error {
 		Status:   "waiting",
 	}
 
-	// Get current queue position
-	position, err := q.getNextQueuePosition(c.Context(), req.EventID)
+	// Get current global position from stream
+	position, err := q.streamQueue.GetGlobalPosition(ctx, req.EventID, req.UserID, result.StreamID)
 	if err != nil {
-		q.logger.WithError(err).Error("Failed to get queue position")
-		return q.internalError(c, "QUEUE_ERROR", "Failed to join queue")
+		q.logger.WithError(err).Warn("Failed to get global position, using fallback")
+		position = 0 // Fallback
 	}
 
 	queueData.Position = position
 
-	// Store in Redis with TTL (30 minutes)
+	// Store queue data for legacy compatibility
 	queueKey := fmt.Sprintf("queue:waiting:%s", waitingToken)
 	queueDataBytes, _ := json.Marshal(queueData)
-
-	ctx := context.Background()
 	if err := q.redisClient.Set(ctx, queueKey, queueDataBytes, 30*time.Minute).Err(); err != nil {
 		q.logger.WithError(err).Error("Failed to store queue data")
-		return q.internalError(c, "QUEUE_ERROR", "Failed to join queue")
-	}
-
-	// Add to event queue
-	eventQueueKey := fmt.Sprintf("queue:event:%s", req.EventID)
-	if err := q.redisClient.ZAdd(ctx, eventQueueKey, redis.Z{
-		Score:  float64(time.Now().Unix()),
-		Member: waitingToken,
-	}).Err(); err != nil {
-		q.logger.WithError(err).Error("Failed to add to event queue")
 	}
 
 	q.logger.WithFields(logrus.Fields{
 		"waiting_token": waitingToken,
+		"stream_id":     result.StreamID,
 		"event_id":      req.EventID,
 		"user_id":       req.UserID,
 		"position":      position,
-	}).Info("User joined queue")
+	}).Info("User joined queue via Lua + Streams")
 
 	return c.Status(fiber.StatusAccepted).JSON(JoinQueueResponse{
 		WaitingToken: waitingToken,
@@ -169,7 +210,7 @@ func (q *QueueHandler) Status(c *fiber.Ctx) error {
 	}
 
 	// Calculate current position and ETA
-	currentPosition, eta := q.calculatePositionAndETA(c.Context(), queueData)
+	currentPosition, eta := q.calculatePositionAndETA(c.Context(), queueData, waitingToken)
 	waitingTime := int(time.Since(queueData.JoinedAt).Seconds())
 
 	return c.JSON(QueueStatusResponse{
@@ -212,8 +253,8 @@ func (q *QueueHandler) Enter(c *fiber.Ctx) error {
 		return q.internalError(c, "QUEUE_ERROR", "Failed to validate waiting token")
 	}
 
-	// Check if user is at front of queue (simplified logic)
-	if !q.isEligibleForEntry(c.Context(), queueData) {
+	// Check if user is eligible for entry (position, wait time, rate limit)
+	if !q.isEligibleForEntry(c.Context(), queueData, req.WaitingToken) {
 		return q.forbiddenError(c, "NOT_READY", "Your turn has not arrived yet")
 	}
 
@@ -223,10 +264,10 @@ func (q *QueueHandler) Enter(c *fiber.Ctx) error {
 	// Store reservation token with TTL (30 seconds as per spec)
 	reservationKey := fmt.Sprintf("queue:reservation:%s", reservationToken)
 	reservationData := map[string]interface{}{
-		"event_id":       queueData.EventID,
-		"user_id":        queueData.UserID,
-		"waiting_token":  req.WaitingToken,
-		"granted_at":     time.Now(),
+		"event_id":      queueData.EventID,
+		"user_id":       queueData.UserID,
+		"waiting_token": req.WaitingToken,
+		"granted_at":    time.Now(),
 	}
 
 	ctx := context.Background()
@@ -241,6 +282,12 @@ func (q *QueueHandler) Enter(c *fiber.Ctx) error {
 	queueDataBytes, _ := json.Marshal(queueData)
 	queueKey := fmt.Sprintf("queue:waiting:%s", req.WaitingToken)
 	q.redisClient.Set(ctx, queueKey, queueDataBytes, 30*time.Minute)
+
+	// Record admission for metrics tracking
+	metrics := queue.NewAdmissionMetrics(q.redisClient, queueData.EventID, q.logger)
+	if err := metrics.RecordAdmission(ctx, queueData.UserID); err != nil {
+		q.logger.WithError(err).Warn("Failed to record admission metric")
+	}
 
 	q.logger.WithFields(logrus.Fields{
 		"waiting_token":     req.WaitingToken,
@@ -321,31 +368,106 @@ func (q *QueueHandler) getNextQueuePosition(ctx context.Context, eventID string)
 	return int(count) + 1, nil
 }
 
-func (q *QueueHandler) calculatePositionAndETA(ctx context.Context, queueData *QueueData) (int, int) {
-	// Simplified calculation - in production this would be more sophisticated
-	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+func (q *QueueHandler) calculatePositionAndETA(ctx context.Context, queueData *QueueData, waitingToken string) (int, int) {
+	// Try to get position from Stream first (new approach)
+	streamKey := fmt.Sprintf("stream:event:{%s}:user:%s", queueData.EventID, queueData.UserID)
 
-	// Get rank in sorted set (position in queue)
-	rank, err := q.redisClient.ZRank(ctx, eventQueueKey, fmt.Sprintf("queue:waiting:%s", queueData.EventID)).Result()
+	// Get all stream entries for this user
+	entries, err := q.redisClient.XRange(ctx, streamKey, "-", "+").Result()
+	if err == nil && len(entries) > 0 {
+		// Find the entry with matching token
+		for _, entry := range entries {
+			if token, ok := entry.Values["token"].(string); ok && token == waitingToken {
+				// Calculate global position using StreamQueue
+				position, err := q.streamQueue.GetGlobalPosition(ctx, queueData.EventID, queueData.UserID, entry.ID)
+				if err == nil {
+					// Use advanced sliding window ETA calculation
+					slidingWindow := queue.NewSlidingWindowMetrics(q.redisClient, queueData.EventID, q.logger)
+					eta := slidingWindow.CalculateAdvancedETA(ctx, position)
+					confidence := slidingWindow.GetETAConfidence(ctx)
+
+					q.logger.WithFields(logrus.Fields{
+						"waiting_token": waitingToken,
+						"stream_id":     entry.ID,
+						"position":      position,
+						"eta":           eta,
+						"confidence":    confidence,
+					}).Debug("Calculated position and ETA from Stream")
+
+					return position, eta
+				}
+			}
+		}
+	}
+
+	// Fallback to ZSET-based calculation (legacy support)
+	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+	rank, err := q.redisClient.ZRank(ctx, eventQueueKey, waitingToken).Result()
 	if err != nil {
+		q.logger.WithError(err).WithFields(logrus.Fields{
+			"waiting_token": waitingToken,
+			"event_id":      queueData.EventID,
+		}).Warn("Failed to get queue rank, using stored position")
 		return queueData.Position, 60 // Default ETA
 	}
 
 	position := int(rank) + 1
-	eta := position * 2 // 2 seconds per person (simplified)
 
-	if eta < 0 {
-		eta = 0
-	}
+	// Use advanced sliding window ETA calculation
+	slidingWindow := queue.NewSlidingWindowMetrics(q.redisClient, queueData.EventID, q.logger)
+	eta := slidingWindow.CalculateAdvancedETA(ctx, position)
+	confidence := slidingWindow.GetETAConfidence(ctx)
+
+	q.logger.WithFields(logrus.Fields{
+		"waiting_token": waitingToken,
+		"position":      position,
+		"eta":           eta,
+		"confidence":    confidence,
+		"method":        "fallback_zset",
+	}).Debug("Calculated position and ETA with sliding window (fallback)")
 
 	return position, eta
 }
 
-func (q *QueueHandler) isEligibleForEntry(ctx context.Context, queueData *QueueData) bool {
-	// Simplified logic - allow entry if user has waited more than 10 seconds
-	// In production, this would check actual queue position and admission rate
+func (q *QueueHandler) isEligibleForEntry(ctx context.Context, queueData *QueueData, waitingToken string) bool {
+	// 1. Minimum wait time check (5 seconds)
 	waitTime := time.Since(queueData.JoinedAt)
-	return waitTime > 10*time.Second
+	if waitTime < 5*time.Second {
+		q.logger.WithFields(logrus.Fields{
+			"waiting_token": waitingToken,
+			"wait_time":     waitTime.Seconds(),
+		}).Debug("Not eligible: minimum wait time not met")
+		return false
+	}
+
+	// 2. Queue position check (top 100 only)
+	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+	rank, err := q.redisClient.ZRank(ctx, eventQueueKey, waitingToken).Result()
+	if err != nil || int(rank) >= 100 {
+		q.logger.WithFields(logrus.Fields{
+			"waiting_token": waitingToken,
+			"rank":          rank,
+			"error":         err,
+		}).Debug("Not eligible: not in top 100 positions")
+		return false
+	}
+
+	// 3. Token Bucket check (rate limiting)
+	bucket := queue.NewTokenBucketAdmission(q.redisClient, queueData.EventID, q.logger)
+	admitted, err := bucket.TryAdmit(ctx, queueData.UserID)
+
+	if err != nil {
+		q.logger.WithError(err).Error("Token bucket admission failed")
+		return false
+	}
+
+	q.logger.WithFields(logrus.Fields{
+		"waiting_token": waitingToken,
+		"rank":          rank,
+		"admitted":      admitted,
+	}).Info("Eligibility check completed")
+
+	return admitted
 }
 
 // Error response helpers
