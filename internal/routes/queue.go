@@ -28,10 +28,11 @@ type JoinQueueRequest struct {
 }
 
 type QueueStatusResponse struct {
-	Status      string `json:"status"`       // waiting|ready|expired
-	Position    int    `json:"position"`     // Current position in queue
-	ETASeconds  int    `json:"eta_sec"`      // Estimated time to admission
-	WaitingTime int    `json:"waiting_time"` // Time already waited in seconds
+	Status        string `json:"status"`          // waiting|ready|expired
+	Position      int    `json:"position"`        // Current position in queue
+	ETASeconds    int    `json:"eta_sec"`         // Estimated time to admission
+	WaitingTime   int    `json:"waiting_time"`    // Time already waited in seconds
+	ReadyForEntry bool   `json:"ready_for_entry"` // True if user can call Enter API
 }
 
 type JoinQueueResponse struct {
@@ -224,11 +225,15 @@ func (q *QueueHandler) Status(c *fiber.Ctx) error {
 	currentPosition, eta := q.calculatePositionAndETA(c.Context(), queueData, waitingToken)
 	waitingTime := int(time.Since(queueData.JoinedAt).Seconds())
 
+	// Check if user is ready for entry (eligible to call Enter API)
+	readyForEntry := q.isEligibleForEntry(c.Context(), queueData, waitingToken)
+
 	return c.JSON(QueueStatusResponse{
-		Status:      queueData.Status,
-		Position:    currentPosition,
-		ETASeconds:  eta,
-		WaitingTime: waitingTime,
+		Status:        queueData.Status,
+		Position:      currentPosition,
+		ETASeconds:    eta,
+		WaitingTime:   waitingTime,
+		ReadyForEntry: readyForEntry,
 	})
 }
 
