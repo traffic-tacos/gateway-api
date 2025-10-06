@@ -3,10 +3,11 @@ package routes
 import (
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/traffic-tacos/gateway-api/internal/clients"
 	"github.com/traffic-tacos/gateway-api/internal/config"
-	"github.com/traffic-tacos/gateway-api/internal/middleware"
 	"github.com/traffic-tacos/gateway-api/internal/metrics"
+	"github.com/traffic-tacos/gateway-api/internal/middleware"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/swagger"
@@ -14,7 +15,7 @@ import (
 )
 
 // Setup configures all API routes
-func Setup(app *fiber.App, cfg *config.Config, logger *logrus.Logger, middlewareManager *middleware.Manager) {
+func Setup(app *fiber.App, cfg *config.Config, logger *logrus.Logger, middlewareManager *middleware.Manager, dynamoClient *dynamodb.Client) {
 	// Initialize gRPC clients
 	reservationClient, err := clients.NewReservationClient(&cfg.Backend.ReservationAPI, logger)
 	if err != nil {
@@ -30,6 +31,7 @@ func Setup(app *fiber.App, cfg *config.Config, logger *logrus.Logger, middleware
 	queueHandler := NewQueueHandler(middlewareManager.RedisClient, logger)
 	reservationHandler := NewReservationHandler(reservationClient, logger)
 	paymentHandler := NewPaymentHandler(paymentClient, logger)
+	authHandler := NewAuthHandler(dynamoClient, cfg.DynamoDB.UsersTableName, cfg.JWT.Secret, logger)
 
 	// Health check endpoints (no auth required)
 	app.Get("/healthz", healthCheck)
@@ -51,6 +53,11 @@ func Setup(app *fiber.App, cfg *config.Config, logger *logrus.Logger, middleware
 	api.Use(middlewareManager.Idempotency.Handle())
 	api.Use(middlewareManager.Idempotency.ResponseCapture())
 
+	// Auth routes (public endpoints - no auth required)
+	authRoutes := api.Group("/auth")
+	authRoutes.Post("/login", authHandler.Login)
+	authRoutes.Post("/register", authHandler.Register)
+
 	// Queue management routes (public endpoints - no auth required)
 	queueRoutes := api.Group("/queue")
 	queueRoutes.Post("/join", queueHandler.Join)
@@ -59,8 +66,9 @@ func Setup(app *fiber.App, cfg *config.Config, logger *logrus.Logger, middleware
 	queueRoutes.Delete("/leave", queueHandler.Leave)
 
 	// Protected routes (require authentication)
-	exemptPaths := []string{"/healthz", "/readyz", "/version", "/metrics", "/swagger", "/api/v1/queue/join", "/api/v1/queue/status"}
-	protected := api.Use(middlewareManager.Auth.Authenticate(exemptPaths))
+	// Auth 미들웨어를 보호된 라우트에만 적용
+	protected := api.Group("")
+	protected.Use(middlewareManager.Auth.Authenticate([]string{"/healthz", "/readyz", "/version", "/metrics", "/swagger"}))
 
 	// Reservation routes
 	reservationRoutes := protected.Group("/reservations")
@@ -108,9 +116,9 @@ func readinessCheck(middlewareManager *middleware.Manager) fiber.Handler {
 		redisHealthCheck := middleware.RedisHealthCheck(middlewareManager.RedisClient, middlewareManager.Logger)
 		if err := redisHealthCheck(); err != nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"status":  "not ready",
-				"reason":  "redis unavailable",
-				"error":   err.Error(),
+				"status":    "not ready",
+				"reason":    "redis unavailable",
+				"error":     err.Error(),
 				"timestamp": time.Now().UTC(),
 			})
 		}
@@ -138,7 +146,6 @@ func versionHandler(c *fiber.Ctx) error {
 		"built":   getBuildTime(),
 	})
 }
-
 
 // notFoundHandler handles 404 errors
 func notFoundHandler(c *fiber.Ctx) error {
