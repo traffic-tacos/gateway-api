@@ -207,20 +207,33 @@ func initializeDynamoDB(cfg *config.Config, logger *logrus.Logger) (*dynamodb.Cl
 	var err error
 
 	if cfg.AWS.Profile != "" {
-		// Use specific profile
+		// Use specific profile for local development
 		awsCfg, err = awsconfig.LoadDefaultConfig(ctx,
 			awsconfig.WithRegion(cfg.DynamoDB.Region),
 			awsconfig.WithSharedConfigProfile(cfg.AWS.Profile),
 		)
 	} else {
-		// Use default credentials chain (EC2 role, environment variables, etc.)
+		// Use IRSA (IAM Roles for Service Accounts) in Kubernetes
+		// Note: AWS SDK automatically detects IRSA via AWS_WEB_IDENTITY_TOKEN_FILE and AWS_ROLE_ARN env vars
 		awsCfg, err = awsconfig.LoadDefaultConfig(ctx,
 			awsconfig.WithRegion(cfg.DynamoDB.Region),
 		)
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	// Log credentials provider info for debugging
+	creds, credErr := awsCfg.Credentials.Retrieve(ctx)
+	if credErr != nil {
+		logger.WithError(credErr).Warn("Failed to retrieve credentials (will retry on first API call)")
+	} else {
+		logger.WithFields(logrus.Fields{
+			"provider":        creds.Source,
+			"has_session_token": creds.SessionToken != "",
+			"region":          cfg.DynamoDB.Region,
+		}).Debug("AWS credentials retrieved")
 	}
 
 	// Create DynamoDB client
