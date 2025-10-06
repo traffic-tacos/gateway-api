@@ -14,12 +14,24 @@ import (
 	"github.com/traffic-tacos/gateway-api/internal/middleware"
 	"github.com/traffic-tacos/gateway-api/internal/routes"
 
+	"github.com/gofiber/contrib/otelfiber"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/helmet"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/sirupsen/logrus"
+
+	"log"
+
+	"go.opentelemetry.io/otel"
+	stdout "go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/sdk/resource"
+
+	//"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 )
 
 // @title Gateway API
@@ -42,6 +54,8 @@ import (
 // @name Authorization
 // @description Type "Bearer" followed by a space and JWT token.
 
+var tracer = otel.Tracer("fiber-server")
+
 func main() {
 	// Load configuration
 	cfg, err := config.Load()
@@ -63,6 +77,13 @@ func main() {
 		logger.WithError(err).Fatal("Failed to setup tracing")
 	}
 	defer tracingShutdown()
+
+	tp := initTracer()
+	defer func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			log.Printf("Error shutting down tracer provider: %v", err)
+		}
+	}()
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
@@ -103,6 +124,8 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           86400,
 	}))
+	// OTEL use
+	app.Use(otelfiber.Middleware())
 
 	// Initialize middleware manager
 	middlewareManager, err := middleware.NewManager(cfg, logger)
@@ -145,4 +168,24 @@ func setupTracing(cfg *config.Config, logger *logrus.Logger) (func(), error) {
 			logger.WithError(err).Error("Failed to shutdown tracing")
 		}
 	}, nil
+}
+
+// Init Tracing
+func initTracer() *sdktrace.TracerProvider {
+	exporter, err := stdout.New(stdout.WithPrettyPrint())
+	if err != nil {
+		log.Fatal(err)
+	}
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(
+			resource.NewWithAttributes(
+				semconv.SchemaURL,
+				semconv.ServiceNameKey.String("my-service"),
+			)),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	return tp
 }
