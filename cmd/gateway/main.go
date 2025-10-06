@@ -7,9 +7,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	_ "github.com/traffic-tacos/gateway-api/docs" // Swagger docs
 	"github.com/traffic-tacos/gateway-api/internal/config"
 	"github.com/traffic-tacos/gateway-api/internal/logging"
@@ -17,12 +14,24 @@ import (
 	"github.com/traffic-tacos/gateway-api/internal/middleware"
 	"github.com/traffic-tacos/gateway-api/internal/routes"
 
+	"github.com/gofiber/contrib/otelfiber"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/helmet"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/sirupsen/logrus"
+
+	"log"
+
+	"go.opentelemetry.io/otel"
+	stdout "go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/sdk/resource"
+
+	//"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 )
 
 // @title Gateway API
@@ -45,6 +54,8 @@ import (
 // @name Authorization
 // @description Type "Bearer" followed by a space and JWT token.
 
+var tracer = otel.Tracer("fiber-server")
+
 func main() {
 	// Load configuration
 	cfg, err := config.Load()
@@ -66,6 +77,13 @@ func main() {
 		logger.WithError(err).Fatal("Failed to setup tracing")
 	}
 	defer tracingShutdown()
+
+	tp := initTracer()
+	defer func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			log.Printf("Error shutting down tracer provider: %v", err)
+		}
+	}()
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
@@ -106,6 +124,8 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           86400,
 	}))
+	// OTEL use
+	app.Use(otelfiber.Middleware())
 
 	// Initialize middleware manager
 	middlewareManager, err := middleware.NewManager(cfg, logger)
@@ -113,14 +133,8 @@ func main() {
 		logger.WithError(err).Fatal("Failed to initialize middleware manager")
 	}
 
-	// Initialize AWS SDK and DynamoDB client
-	dynamoClient, err := initializeDynamoDB(cfg, logger)
-	if err != nil {
-		logger.WithError(err).Fatal("Failed to initialize DynamoDB client")
-	}
-
 	// Setup routes
-	routes.Setup(app, cfg, logger, middlewareManager, dynamoClient)
+	routes.Setup(app, cfg, logger, middlewareManager)
 
 	// Graceful shutdown
 	c := make(chan os.Signal, 1)
@@ -156,37 +170,22 @@ func setupTracing(cfg *config.Config, logger *logrus.Logger) (func(), error) {
 	}, nil
 }
 
-func initializeDynamoDB(cfg *config.Config, logger *logrus.Logger) (*dynamodb.Client, error) {
-	ctx := context.Background()
-
-	// Load AWS config
-	var awsCfg aws.Config
-	var err error
-
-	if cfg.AWS.Profile != "" {
-		// Use specific profile
-		awsCfg, err = awsconfig.LoadDefaultConfig(ctx,
-			awsconfig.WithRegion(cfg.DynamoDB.Region),
-			awsconfig.WithSharedConfigProfile(cfg.AWS.Profile),
-		)
-	} else {
-		// Use default credentials chain (EC2 role, environment variables, etc.)
-		awsCfg, err = awsconfig.LoadDefaultConfig(ctx,
-			awsconfig.WithRegion(cfg.DynamoDB.Region),
-		)
-	}
-
+// Init Tracing
+func initTracer() *sdktrace.TracerProvider {
+	exporter, err := stdout.New(stdout.WithPrettyPrint())
 	if err != nil {
-		return nil, err
+		log.Fatal(err)
 	}
-
-	// Create DynamoDB client
-	dynamoClient := dynamodb.NewFromConfig(awsCfg)
-
-	logger.WithFields(logrus.Fields{
-		"region":     cfg.DynamoDB.Region,
-		"table_name": cfg.DynamoDB.UsersTableName,
-	}).Info("DynamoDB client initialized")
-
-	return dynamoClient, nil
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(
+			resource.NewWithAttributes(
+				semconv.SchemaURL,
+				semconv.ServiceNameKey.String("my-service"),
+			)),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	return tp
 }
