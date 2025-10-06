@@ -4,7 +4,29 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
 
 ## Recent Updates
 
-### 🚀 Phase 1 완료 - Lua Script + Redis Streams 통합 (v1.3.0)
+### 🔥 v1.3.3 - Heartbeat 메커니즘 (자동 이탈 감지)
+
+- ✅ **Heartbeat 기반 자동 정리**: 5분간 Status 호출 없으면 대기열에서 자동 제거
+- ✅ **유령 사용자 방지**: 브라우저 닫기/네트워크 끊김 시 자동 감지 및 정리
+- ✅ **Position 정확도 향상**: 실제 활성 사용자만 Position 계산에 포함
+- ✅ **메모리 효율 개선**: 비활성 사용자 키 자동 삭제 (5분 TTL)
+- ✅ **Zero 프론트엔드 변경**: 기존 2초 폴링이 Heartbeat 역할 수행
+
+### 🐛 v1.3.2 - 메모리 누수 방지
+
+- ✅ **ZSET TTL 추가**: 1시간 TTL로 유령 사용자 자동 정리
+- ✅ **Stream TTL 추가**: 1시간 TTL로 메모리 누수 방지
+- ✅ **Join 후 이탈 대응**: Leave API 미호출 시에도 자동 정리
+
+### 🔧 v1.3.1 - Critical Bug Fixes
+
+- ✅ **Position 고정 버그 수정**: Enter 시 ZSET에서 사용자 제거하여 Position 실시간 업데이트
+- ✅ **ZSET/Stream 동기화**: Join/Enter/Leave에서 일관성 보장
+- ✅ **동적 대기 시간**: Position 기반 차등 대기 시간 (Top 10: 0초, 11-50: 2초, 51+: 5초)
+- ✅ **Top 10 VIP 바이패스**: 상위 10명은 Token Bucket 제한 없이 즉시 입장
+- ✅ **ready_for_entry 플래그**: 프론트엔드에 입장 가능 여부 명시적 전달
+
+### 🚀 v1.3.0 - Phase 1 완료 (Lua Script + Redis Streams 통합)
 
 - ✅ **Lua Executor**: 원자적 연산 + 멱등성 보장 (중복 요청 차단)
 - ✅ **Redis Streams**: Per-User FIFO 순서 보장 + Global Position 계산
@@ -38,8 +60,11 @@ A high-performance BFF (Backend for Frontend) service for the Traffic Tacos tick
   - **Lua Executor**: 원자적 연산으로 Race Condition 방지
   - **Redis Streams**: Per-User FIFO 순서 보장
   - **Sliding Window ETA**: 다중 시간 윈도우 기반 정확한 대기 시간 예측
-  - **Token Bucket Admission**: 공정한 입장 제어
+  - **Token Bucket Admission**: 공정한 입장 제어 + Top 10 VIP 바이패스
+  - **Heartbeat Mechanism**: 5분 TTL 기반 자동 이탈 감지 및 유령 사용자 정리
+  - **Dynamic Wait Time**: Position 기반 차등 대기 시간 (Top 10: 0초, 11-50: 2초, 51+: 5초)
   - **Idempotency Protection**: 중복 요청 자동 차단 (409 Conflict)
+  - **Memory Efficiency**: ZSET/Stream 1시간 TTL로 자동 정리
 - **Backend Integration**: gRPC-based communication with reservation, inventory, and payment services
 - **Proto Contracts**: Type-safe service communication using Traffic Tacos proto-contracts module
 - **AWS Integration**: ElastiCache Redis with Secrets Manager for production deployment
@@ -679,6 +704,7 @@ Comprehensive documentation available in `docs/` directory:
 
 - **[Queue Algorithms](docs/QUEUE_ALGORITHMS.md)** - ETA 계산 및 Admission Control 알고리즘 상세 설명
 - **[Queue Workflow](docs/QUEUE_WORKFLOW.md)** - Redis 기반 대기열 시스템 워크플로우
+- **[Heartbeat Mechanism](docs/HEARTBEAT_MECHANISM.md)** - Heartbeat 기반 자동 이탈 감지 및 유령 사용자 정리 (v1.3.3+)
 - **[Technical Highlights](docs/TECHNICAL_HIGHLIGHTS.md)** - 핵심 기술 요약 (발표용)
 
 ### 🔧 Implementation Guides
@@ -699,6 +725,7 @@ Comprehensive documentation available in `docs/` directory:
 - **[Deployment Summary](docs/DEPLOYMENT_SUMMARY.md)** - v1.1.0 배포 요약
 - **[Final Deployment Report](docs/FINAL_DEPLOYMENT_REPORT.md)** - 배포 검증 보고서
 - **[v1.2.0 Deployment](docs/FINAL_V1.2.0_DEPLOYMENT.md)** - v1.2.0 배포 완료
+- **[v1.3.1 Critical Bugfix](docs/CRITICAL_BUGFIX_V1.3.1.md)** - Position 고정 버그 수정 및 입장 조건 개선
 
 ### 🎤 Presentations
 
