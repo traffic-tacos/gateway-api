@@ -101,7 +101,7 @@ Load Balancer
 
 ### Prerequisites
 
-- Go 1.23+
+- Go 1.24+
 - Redis (local or AWS ElastiCache)
 - Access to JWT JWKS endpoint
 - gRPC backend services (reservation-api, inventory-api, payment-sim-api)
