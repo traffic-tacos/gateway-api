@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -230,9 +231,9 @@ func initializeDynamoDB(cfg *config.Config, logger *logrus.Logger) (*dynamodb.Cl
 		logger.WithError(credErr).Warn("Failed to retrieve credentials (will retry on first API call)")
 	} else {
 		logger.WithFields(logrus.Fields{
-			"provider":        creds.Source,
+			"provider":          creds.Source,
 			"has_session_token": creds.SessionToken != "",
-			"region":          cfg.DynamoDB.Region,
+			"region":            cfg.DynamoDB.Region,
 		}).Debug("AWS credentials retrieved")
 	}
 
