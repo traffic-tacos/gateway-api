@@ -11,15 +11,16 @@ import (
 )
 
 type Config struct {
-	Server      ServerConfig      `envconfig:"SERVER"`
-	Redis       RedisConfig       `envconfig:"REDIS"`
-	JWT         JWTConfig         `envconfig:"JWT"`
-	Backend     BackendConfig     `envconfig:"BACKEND"`
-	RateLimit   RateLimitConfig   `envconfig:"RATE_LIMIT"`
+	Server        ServerConfig        `envconfig:"SERVER"`
+	Redis         RedisConfig         `envconfig:"REDIS"`
+	JWT           JWTConfig           `envconfig:"JWT"`
+	DynamoDB      DynamoDBConfig      `envconfig:"DYNAMODB"`
+	Backend       BackendConfig       `envconfig:"BACKEND"`
+	RateLimit     RateLimitConfig     `envconfig:"RATE_LIMIT"`
 	Observability ObservabilityConfig `envconfig:"OBSERVABILITY"`
-	CORS        CORSConfig        `envconfig:"CORS"`
-	Log         LogConfig         `envconfig:"LOG"`
-	AWS         AWSConfig         `envconfig:"AWS"`
+	CORS          CORSConfig          `envconfig:"CORS"`
+	Log           LogConfig           `envconfig:"LOG"`
+	AWS           AWSConfig           `envconfig:"AWS"`
 }
 
 type AWSConfig struct {
@@ -37,21 +38,27 @@ type ServerConfig struct {
 }
 
 type RedisConfig struct {
-	Address              string        `envconfig:"ADDRESS" default:"localhost:6379"`
-	Password             string        `envconfig:"PASSWORD" default:""`
-	Database             int           `envconfig:"DATABASE" default:"0"`
-	MaxRetries           int           `envconfig:"MAX_RETRIES" default:"3"`
-	PoolSize             int           `envconfig:"POOL_SIZE" default:"100"`
-	PoolTimeout          time.Duration `envconfig:"POOL_TIMEOUT" default:"4s"`
-	TLSEnabled           bool          `envconfig:"TLS_ENABLED" default:"false"`
-	PasswordFromSecrets  bool          `envconfig:"PASSWORD_FROM_SECRETS" default:"false"`
+	Address             string        `envconfig:"ADDRESS" default:"localhost:6379"`
+	Password            string        `envconfig:"PASSWORD" default:""`
+	Database            int           `envconfig:"DATABASE" default:"0"`
+	MaxRetries          int           `envconfig:"MAX_RETRIES" default:"3"`
+	PoolSize            int           `envconfig:"POOL_SIZE" default:"100"`
+	PoolTimeout         time.Duration `envconfig:"POOL_TIMEOUT" default:"4s"`
+	TLSEnabled          bool          `envconfig:"TLS_ENABLED" default:"false"`
+	PasswordFromSecrets bool          `envconfig:"PASSWORD_FROM_SECRETS" default:"false"`
 }
 
 type JWTConfig struct {
-	JWKSEndpoint string        `envconfig:"JWKS_ENDPOINT" required:"true"`
+	JWKSEndpoint string        `envconfig:"JWKS_ENDPOINT" required:"false"` // Optional for custom auth
 	CacheTTL     time.Duration `envconfig:"CACHE_TTL" default:"10m"`
-	Issuer       string        `envconfig:"ISSUER" required:"true"`
-	Audience     string        `envconfig:"AUDIENCE" required:"true"`
+	Issuer       string        `envconfig:"ISSUER" required:"false"`                  // Optional for custom auth
+	Audience     string        `envconfig:"AUDIENCE" required:"false"`                // Optional for custom auth
+	Secret       string        `envconfig:"SECRET" default:"change-me-in-production"` // For self-issued JWT
+}
+
+type DynamoDBConfig struct {
+	UsersTableName string `envconfig:"USERS_TABLE_NAME" default:"traffic-tacos-users"`
+	Region         string `envconfig:"REGION" default:"ap-northeast-2"`
 }
 
 type BackendConfig struct {
@@ -72,18 +79,18 @@ type PaymentAPIConfig struct {
 }
 
 type RateLimitConfig struct {
-	RPS           int           `envconfig:"RPS" default:"50"`
-	Burst         int           `envconfig:"BURST" default:"100"`
-	WindowSize    time.Duration `envconfig:"WINDOW_SIZE" default:"1s"`
-	Enabled       bool          `envconfig:"ENABLED" default:"true"`
-	ExemptPaths   []string      `envconfig:"EXEMPT_PATHS" default:"/healthz,/readyz,/metrics"`
+	RPS         int           `envconfig:"RPS" default:"50"`
+	Burst       int           `envconfig:"BURST" default:"100"`
+	WindowSize  time.Duration `envconfig:"WINDOW_SIZE" default:"1s"`
+	Enabled     bool          `envconfig:"ENABLED" default:"true"`
+	ExemptPaths []string      `envconfig:"EXEMPT_PATHS" default:"/healthz,/readyz,/metrics"`
 }
 
 type ObservabilityConfig struct {
-	MetricsPath   string `envconfig:"METRICS_PATH" default:"/metrics"`
-	OTLPEndpoint  string `envconfig:"OTLP_ENDPOINT" default:"http://localhost:4318"`
-	TracingEnabled bool   `envconfig:"TRACING_ENABLED" default:"true"`
-	SampleRate    float64 `envconfig:"SAMPLE_RATE" default:"0.1"`
+	MetricsPath    string  `envconfig:"METRICS_PATH" default:"/metrics"`
+	OTLPEndpoint   string  `envconfig:"OTLP_ENDPOINT" default:"http://localhost:4318"`
+	TracingEnabled bool    `envconfig:"TRACING_ENABLED" default:"true"`
+	SampleRate     float64 `envconfig:"SAMPLE_RATE" default:"0.1"`
 }
 
 type CORSConfig struct {

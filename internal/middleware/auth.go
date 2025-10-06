@@ -16,34 +16,41 @@ import (
 )
 
 type AuthMiddleware struct {
-	config     *config.JWTConfig
+	config      *config.JWTConfig
 	redisClient *redis.Client
-	logger     *logrus.Logger
-	jwkCache   jwk.Cache
+	logger      *logrus.Logger
+	jwkCache    *jwk.Cache
+	jwtSecret   string // For self-issued JWT validation
 }
 
 func NewAuthMiddleware(cfg *config.JWTConfig, redisClient *redis.Client, logger *logrus.Logger) (*AuthMiddleware, error) {
-	// Create JWK cache
-	cache := jwk.NewCache(context.Background())
+	var cache *jwk.Cache
 
-	// Register the JWKS endpoint
-	if err := cache.Register(cfg.JWKSEndpoint, jwk.WithMinRefreshInterval(cfg.CacheTTL)); err != nil {
-		return nil, fmt.Errorf("failed to register JWKS endpoint: %w", err)
-	}
+	// Only initialize JWKS if endpoint is configured
+	if cfg.JWKSEndpoint != "" {
+		c := jwk.NewCache(context.Background())
+		cache = c
 
-	// Pre-fetch the keys
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+		// Register the JWKS endpoint
+		if err := cache.Register(cfg.JWKSEndpoint, jwk.WithMinRefreshInterval(cfg.CacheTTL)); err != nil {
+			return nil, fmt.Errorf("failed to register JWKS endpoint: %w", err)
+		}
 
-	if _, err := cache.Refresh(ctx, cfg.JWKSEndpoint); err != nil {
-		logger.WithError(err).Warn("Failed to pre-fetch JWKS, will try during first request")
+		// Pre-fetch the keys
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if _, err := cache.Refresh(ctx, cfg.JWKSEndpoint); err != nil {
+			logger.WithError(err).Warn("Failed to pre-fetch JWKS, will try during first request")
+		}
 	}
 
 	return &AuthMiddleware{
 		config:      cfg,
 		redisClient: redisClient,
 		logger:      logger,
-		jwkCache:    *cache,
+		jwkCache:    cache,
+		jwtSecret:   cfg.Secret,
 	}, nil
 }
 
@@ -83,10 +90,10 @@ func (a *AuthMiddleware) Authenticate(exemptPaths []string) fiber.Handler {
 
 				// Set mock user context for dev mode
 				mockClaims := jwt.MapClaims{
-					"sub": "dev-user-123",
-					"aud": a.config.Audience,
-					"iss": a.config.Issuer,
-					"exp": float64(time.Now().Add(24 * time.Hour).Unix()),
+					"sub":  "dev-user-123",
+					"aud":  a.config.Audience,
+					"iss":  a.config.Issuer,
+					"exp":  float64(time.Now().Add(24 * time.Hour).Unix()),
 					"role": "developer",
 				}
 				c.Locals("user_claims", mockClaims)
@@ -104,10 +111,10 @@ func (a *AuthMiddleware) Authenticate(exemptPaths []string) fiber.Handler {
 				userID := fmt.Sprintf("load-test-user-%d", time.Now().UnixNano()%30000)
 
 				mockClaims := jwt.MapClaims{
-					"sub": userID,
-					"aud": a.config.Audience,
-					"iss": a.config.Issuer,
-					"exp": float64(time.Now().Add(1 * time.Hour).Unix()),
+					"sub":  userID,
+					"aud":  a.config.Audience,
+					"iss":  a.config.Issuer,
+					"exp":  float64(time.Now().Add(1 * time.Hour).Unix()),
 					"role": "user",
 				}
 				c.Locals("user_claims", mockClaims)
@@ -138,10 +145,20 @@ func (a *AuthMiddleware) Authenticate(exemptPaths []string) fiber.Handler {
 func (a *AuthMiddleware) validateToken(ctx context.Context, tokenString string) (jwt.MapClaims, error) {
 	// Parse token without verification to get the key ID
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Get the key ID from token header
-		keyID, ok := token.Header["kid"].(string)
-		if !ok {
-			return nil, fmt.Errorf("kid not found in token header")
+		// Check if this is a self-issued token (no kid header)
+		keyID, hasKid := token.Header["kid"].(string)
+
+		if !hasKid {
+			// Self-issued JWT: validate with HMAC secret
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return []byte(a.jwtSecret), nil
+		}
+
+		// External JWT: validate with JWKS
+		if a.jwkCache == nil {
+			return nil, fmt.Errorf("JWKS not configured, but token has kid header")
 		}
 
 		// Get JWK set from cache
@@ -163,7 +180,7 @@ func (a *AuthMiddleware) validateToken(ctx context.Context, tokenString string) 
 		}
 
 		return verifyKey, nil
-	}, jwt.WithValidMethods([]string{"RS256", "ES256"}))
+	}, jwt.WithValidMethods([]string{"RS256", "ES256", "HS256"}))
 
 	if err != nil {
 		return nil, fmt.Errorf("token parsing failed: %w", err)
@@ -206,38 +223,42 @@ func (a *AuthMiddleware) validateClaims(claims jwt.MapClaims) error {
 		}
 	}
 
-	// Validate issuer
-	if iss, ok := claims["iss"].(string); ok {
-		if iss != a.config.Issuer {
-			return fmt.Errorf("invalid issuer: expected %s, got %s", a.config.Issuer, iss)
+	// Validate issuer (only if configured - skip for self-issued tokens)
+	if a.config.Issuer != "" {
+		if iss, ok := claims["iss"].(string); ok {
+			if iss != a.config.Issuer {
+				return fmt.Errorf("invalid issuer: expected %s, got %s", a.config.Issuer, iss)
+			}
+		} else {
+			return fmt.Errorf("iss claim is required")
 		}
-	} else {
-		return fmt.Errorf("iss claim is required")
 	}
 
-	// Validate audience
-	if aud, ok := claims["aud"]; ok {
-		switch v := aud.(type) {
-		case string:
-			if v != a.config.Audience {
-				return fmt.Errorf("invalid audience: expected %s, got %s", a.config.Audience, v)
-			}
-		case []interface{}:
-			found := false
-			for _, audience := range v {
-				if audStr, ok := audience.(string); ok && audStr == a.config.Audience {
-					found = true
-					break
+	// Validate audience (only if configured - skip for self-issued tokens)
+	if a.config.Audience != "" {
+		if aud, ok := claims["aud"]; ok {
+			switch v := aud.(type) {
+			case string:
+				if v != a.config.Audience {
+					return fmt.Errorf("invalid audience: expected %s, got %s", a.config.Audience, v)
 				}
+			case []interface{}:
+				found := false
+				for _, audience := range v {
+					if audStr, ok := audience.(string); ok && audStr == a.config.Audience {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("invalid audience: %s not found in %v", a.config.Audience, v)
+				}
+			default:
+				return fmt.Errorf("aud claim must be string or array")
 			}
-			if !found {
-				return fmt.Errorf("invalid audience: %s not found in %v", a.config.Audience, v)
-			}
-		default:
-			return fmt.Errorf("aud claim must be string or array")
+		} else {
+			return fmt.Errorf("aud claim is required")
 		}
-	} else {
-		return fmt.Errorf("aud claim is required")
 	}
 
 	return nil
