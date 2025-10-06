@@ -127,17 +127,9 @@ func Load() (*Config, error) {
 }
 
 func validateConfig(cfg *Config) error {
-	if cfg.JWT.JWKSEndpoint == "" {
-		return fmt.Errorf("JWT_JWKS_ENDPOINT is required")
-	}
-
-	if cfg.JWT.Issuer == "" {
-		return fmt.Errorf("JWT_ISSUER is required")
-	}
-
-	if cfg.JWT.Audience == "" {
-		return fmt.Errorf("JWT_AUDIENCE is required")
-	}
+	// JWT fields are optional for self-issued tokens
+	// When using self-issued JWT (with JWT_SECRET), JWKS_ENDPOINT, ISSUER, and AUDIENCE are not required
+	// When using external OIDC/OAuth, these fields should be provided
 
 	// Validate port
 	if port, err := strconv.Atoi(cfg.Server.Port); err != nil || port < 1 || port > 65535 {
