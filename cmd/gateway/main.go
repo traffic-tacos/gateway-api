@@ -7,6 +7,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	_ "github.com/traffic-tacos/gateway-api/docs" // Swagger docs
 	"github.com/traffic-tacos/gateway-api/internal/config"
 	"github.com/traffic-tacos/gateway-api/internal/logging"
@@ -133,8 +136,14 @@ func main() {
 		logger.WithError(err).Fatal("Failed to initialize middleware manager")
 	}
 
+	// Initialize AWS SDK and DynamoDB client
+	dynamoClient, err := initializeDynamoDB(cfg, logger)
+	if err != nil {
+		logger.WithError(err).Fatal("Failed to initialize DynamoDB client")
+	}
+
 	// Setup routes
-	routes.Setup(app, cfg, logger, middlewareManager)
+	routes.Setup(app, cfg, logger, middlewareManager, dynamoClient)
 
 	// Graceful shutdown
 	c := make(chan os.Signal, 1)
@@ -188,4 +197,39 @@ func initTracer() *sdktrace.TracerProvider {
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	return tp
+}
+
+func initializeDynamoDB(cfg *config.Config, logger *logrus.Logger) (*dynamodb.Client, error) {
+	ctx := context.Background()
+
+	// Load AWS config
+	var awsCfg aws.Config
+	var err error
+
+	if cfg.AWS.Profile != "" {
+		// Use specific profile
+		awsCfg, err = awsconfig.LoadDefaultConfig(ctx,
+			awsconfig.WithRegion(cfg.DynamoDB.Region),
+			awsconfig.WithSharedConfigProfile(cfg.AWS.Profile),
+		)
+	} else {
+		// Use default credentials chain (EC2 role, environment variables, etc.)
+		awsCfg, err = awsconfig.LoadDefaultConfig(ctx,
+			awsconfig.WithRegion(cfg.DynamoDB.Region),
+		)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Create DynamoDB client
+	dynamoClient := dynamodb.NewFromConfig(awsCfg)
+
+	logger.WithFields(logrus.Fields{
+		"region":     cfg.DynamoDB.Region,
+		"table_name": cfg.DynamoDB.UsersTableName,
+	}).Info("DynamoDB client initialized")
+
+	return dynamoClient, nil
 }
