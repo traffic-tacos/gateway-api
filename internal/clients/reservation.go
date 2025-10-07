@@ -95,6 +95,17 @@ func (r *ReservationClient) CreateReservation(ctx context.Context, eventID strin
 		return nil, fmt.Errorf("failed to create reservation: %w", err)
 	}
 
+	// 🔴 Check for application-level errors in the response
+	if resp.GetError() != nil {
+		errCode := resp.GetError().GetCode().String()
+		errMsg := resp.GetError().GetMessage()
+		r.logger.WithFields(logrus.Fields{
+			"error_code":    errCode,
+			"error_message": errMsg,
+		}).Warn("Reservation API returned error")
+		return nil, fmt.Errorf("reservation error: %s - %s", errCode, errMsg)
+	}
+
 	return resp, nil
 }
 
@@ -119,6 +130,17 @@ func (r *ReservationClient) GetReservation(ctx context.Context, reservationID st
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get reservation: %w", err)
+	}
+
+	// 🔴 Check for application-level errors in the response
+	if resp.GetError() != nil {
+		errCode := resp.GetError().GetCode().String()
+		errMsg := resp.GetError().GetMessage()
+		r.logger.WithFields(logrus.Fields{
+			"error_code":    errCode,
+			"error_message": errMsg,
+		}).Warn("Reservation API returned error")
+		return nil, fmt.Errorf("reservation error: %s - %s", errCode, errMsg)
 	}
 
 	return resp, nil
@@ -149,6 +171,17 @@ func (r *ReservationClient) ConfirmReservation(ctx context.Context, reservationI
 		return nil, fmt.Errorf("failed to confirm reservation: %w", err)
 	}
 
+	// 🔴 Check for application-level errors in the response
+	if resp.GetError() != nil {
+		errCode := resp.GetError().GetCode().String()
+		errMsg := resp.GetError().GetMessage()
+		r.logger.WithFields(logrus.Fields{
+			"error_code":    errCode,
+			"error_message": errMsg,
+		}).Warn("Reservation API returned error")
+		return nil, fmt.Errorf("reservation error: %s - %s", errCode, errMsg)
+	}
+
 	return resp, nil
 }
 
@@ -173,6 +206,17 @@ func (r *ReservationClient) CancelReservation(ctx context.Context, reservationID
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to cancel reservation: %w", err)
+	}
+
+	// 🔴 Check for application-level errors in the response
+	if resp.GetError() != nil {
+		errCode := resp.GetError().GetCode().String()
+		errMsg := resp.GetError().GetMessage()
+		r.logger.WithFields(logrus.Fields{
+			"error_code":    errCode,
+			"error_message": errMsg,
+		}).Warn("Reservation API returned error")
+		return nil, fmt.Errorf("reservation error: %s - %s", errCode, errMsg)
 	}
 
 	return resp, nil
