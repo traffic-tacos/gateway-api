@@ -22,14 +22,13 @@ func NewRedisClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, logger *l
 	// Cluster Mode: use ClusterClient with Read Replica support
 	if cfg.ClusterMode {
 		logger.WithField("cluster_mode", true).Info("Initializing Redis Cluster Mode with Read Replica support")
-		clusterClient, err := newRedisClusterClient(cfg, awsCfg, logger)
+		_, err := newRedisClusterClient(cfg, awsCfg, logger)
 		if err != nil {
 			return nil, err
 		}
-		// Note: ClusterClient is returned, but gateway code may need to handle redis.UniversalClient for full compatibility
-		// For now, we maintain backward compatibility by casting to *redis.Client (limited, but works for most commands)
-		// In production, consider migrating to redis.UniversalClient
-		logger.Warn("ClusterClient created but returned as Client interface - some operations may require direct cluster access")
+		// Note: This function is deprecated for Cluster Mode
+		// Use NewRedisUniversalClient instead for full Cluster support
+		logger.Warn("ClusterClient created but not returned - use NewRedisUniversalClient instead")
 		return nil, fmt.Errorf("cluster mode requires code migration to redis.UniversalClient - please use NewRedisUniversalClient instead")
 	}
 
