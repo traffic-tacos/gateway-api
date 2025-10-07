@@ -34,15 +34,23 @@ func (a *AdminHandler) FlushTestData(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Default patterns for test data
+	// Default patterns for test data (more specific for Cluster Mode)
 	patterns := []string{
-		"queue:*",       // Queue event keys
-		"idempotency:*", // Idempotency keys
-		"heartbeat:*",   // Heartbeat keys
-		"dedupe:*",      // Deduplication keys
-		"stream:*",      // Stream keys
-		"allow:*",       // Admission allow keys
-		"ratelimit:*",   // Rate limit keys (optional)
+		// Queue patterns (specific for better Cluster Mode compatibility)
+		"queue:waiting:*",      // Queue waiting tokens
+		"queue:event:*",        // Queue event data
+		"queue:reservation:*",  // Queue reservation tokens
+		// Stream patterns
+		"stream:event:*",       // Redis Streams for events
+		// Token and auth patterns
+		"allow:*",              // Admission allow tokens
+		// Idempotency and deduplication
+		"idempotency:*",        // Idempotency keys
+		"dedupe:*",             // Deduplication keys
+		// User activity
+		"heartbeat:*",          // User heartbeat keys
+		// Rate limiting (optional, may contain active limits)
+		"ratelimit:*",          // Rate limit counters
 	}
 
 	// Allow custom patterns from query param
@@ -88,16 +96,16 @@ func (a *AdminHandler) FlushTestData(c *fiber.Ctx) error {
 // deleteKeysByPattern deletes all keys matching the pattern
 func (a *AdminHandler) deleteKeysByPattern(ctx context.Context, pattern string) (int, error) {
 	deleted := 0
-	
+
 	a.logger.WithField("pattern", pattern).Info("Starting key deletion")
-	
+
 	// Use SCAN to iterate through keys (cursor-based, won't block Redis)
 	iter := a.redisClient.Scan(ctx, 0, pattern, 100).Iterator()
-	
+
 	keys := []string{}
 	for iter.Next(ctx) {
 		keys = append(keys, iter.Val())
-		
+
 		// Delete in batches of 100 (smaller for Cluster Mode compatibility)
 		if len(keys) >= 100 {
 			count, err := a.deleteBatch(ctx, keys)
@@ -109,7 +117,7 @@ func (a *AdminHandler) deleteKeysByPattern(ctx context.Context, pattern string) 
 			keys = []string{}
 		}
 	}
-	
+
 	// Delete remaining keys
 	if len(keys) > 0 {
 		count, err := a.deleteBatch(ctx, keys)
@@ -118,17 +126,17 @@ func (a *AdminHandler) deleteKeysByPattern(ctx context.Context, pattern string) 
 		}
 		deleted += count
 	}
-	
+
 	if err := iter.Err(); err != nil {
 		a.logger.WithError(err).WithField("pattern", pattern).Error("SCAN iteration error")
 		return deleted, err
 	}
-	
+
 	a.logger.WithFields(map[string]interface{}{
 		"pattern": pattern,
 		"deleted": deleted,
 	}).Info("Completed key deletion for pattern")
-	
+
 	return deleted, nil
 }
 
@@ -137,9 +145,9 @@ func (a *AdminHandler) deleteBatch(ctx context.Context, keys []string) (int, err
 	if len(keys) == 0 {
 		return 0, nil
 	}
-	
+
 	deleted := 0
-	
+
 	// 🔴 Redis Cluster Mode: Delete keys individually to avoid CROSSSLOT errors
 	// Pipeline doesn't work when keys are in different hash slots
 	for _, key := range keys {
@@ -150,7 +158,7 @@ func (a *AdminHandler) deleteBatch(ctx context.Context, keys []string) (int, err
 		}
 		deleted += int(result)
 	}
-	
+
 	return deleted, nil
 }
 
