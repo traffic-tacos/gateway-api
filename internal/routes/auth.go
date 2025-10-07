@@ -259,8 +259,8 @@ func (h *AuthHandler) generateJWT(user *models.User) (string, int, error) {
 	expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
 
 	claims := jwt.MapClaims{
-		"sub":      user.UserID,   // Standard JWT claim for user ID
-		"user_id":  user.UserID,   // Keep for backward compatibility
+		"sub":      user.UserID, // Standard JWT claim for user ID
+		"user_id":  user.UserID, // Keep for backward compatibility
 		"username": user.Username,
 		"role":     user.Role,
 		"exp":      expiresAt.Unix(),

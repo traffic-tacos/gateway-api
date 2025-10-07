@@ -16,7 +16,7 @@ import (
 )
 
 type IdempotencyMiddleware struct {
-	redisClient *redis.Client
+	redisClient redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	logger      *logrus.Logger
 	ttl         time.Duration
 }
@@ -28,7 +28,7 @@ type IdempotencyRecord struct {
 	CreatedAt  time.Time         `json:"created_at"`
 }
 
-func NewIdempotencyMiddleware(redisClient *redis.Client, logger *logrus.Logger) *IdempotencyMiddleware {
+func NewIdempotencyMiddleware(redisClient redis.UniversalClient, logger *logrus.Logger) *IdempotencyMiddleware {
 	return &IdempotencyMiddleware{
 		redisClient: redisClient,
 		logger:      logger,

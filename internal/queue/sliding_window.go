@@ -11,7 +11,7 @@ import (
 
 // SlidingWindowMetrics implements advanced ETA calculation with multiple time windows
 type SlidingWindowMetrics struct {
-	redisClient *redis.Client
+	redisClient redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	eventID     string
 	logger      *logrus.Logger
 }
@@ -23,7 +23,7 @@ type TimeWindow struct {
 }
 
 // NewSlidingWindowMetrics creates a new sliding window metrics tracker
-func NewSlidingWindowMetrics(redis *redis.Client, eventID string, logger *logrus.Logger) *SlidingWindowMetrics {
+func NewSlidingWindowMetrics(redis redis.UniversalClient, eventID string, logger *logrus.Logger) *SlidingWindowMetrics {
 	return &SlidingWindowMetrics{
 		redisClient: redis,
 		eventID:     eventID,

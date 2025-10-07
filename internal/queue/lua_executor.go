@@ -22,7 +22,7 @@ var releaseSeatAtomicScript string
 
 // LuaExecutor executes Lua scripts atomically on Redis
 type LuaExecutor struct {
-	redis *redis.Client
+	redis redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 
 	// Preloaded scripts
 	enqueueScript *redis.Script
@@ -33,7 +33,7 @@ type LuaExecutor struct {
 }
 
 // NewLuaExecutor creates a new Lua script executor
-func NewLuaExecutor(redisClient *redis.Client, logger *logrus.Logger) *LuaExecutor {
+func NewLuaExecutor(redisClient redis.UniversalClient, logger *logrus.Logger) *LuaExecutor {
 	return &LuaExecutor{
 		redis:         redisClient,
 		enqueueScript: redis.NewScript(enqueueAtomicStreamsScript),

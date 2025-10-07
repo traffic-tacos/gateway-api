@@ -16,7 +16,7 @@ import (
 )
 
 type QueueHandler struct {
-	redisClient *redis.Client
+	redisClient redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	logger      *logrus.Logger
 	luaExecutor *queue.LuaExecutor
 	streamQueue *queue.StreamQueue
@@ -59,7 +59,7 @@ type QueueData struct {
 	Status   string    `json:"status"` // waiting|ready|expired
 }
 
-func NewQueueHandler(redisClient *redis.Client, logger *logrus.Logger) *QueueHandler {
+func NewQueueHandler(redisClient redis.UniversalClient, logger *logrus.Logger) *QueueHandler {
 	return &QueueHandler{
 		redisClient: redisClient,
 		logger:      logger,

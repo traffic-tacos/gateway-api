@@ -11,13 +11,13 @@ import (
 
 // AdmissionMetrics tracks admission rates for ETA calculation
 type AdmissionMetrics struct {
-	redisClient *redis.Client
+	redisClient redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	eventID     string
 	logger      *logrus.Logger
 }
 
 // NewAdmissionMetrics creates a new metrics tracker
-func NewAdmissionMetrics(redis *redis.Client, eventID string, logger *logrus.Logger) *AdmissionMetrics {
+func NewAdmissionMetrics(redis redis.UniversalClient, eventID string, logger *logrus.Logger) *AdmissionMetrics {
 	return &AdmissionMetrics{
 		redisClient: redis,
 		eventID:     eventID,
@@ -102,7 +102,7 @@ func (m *AdmissionMetrics) CalculateSmartETA(ctx context.Context, position int) 
 
 // TokenBucketAdmission implements Token Bucket algorithm for rate limiting
 type TokenBucketAdmission struct {
-	redisClient *redis.Client
+	redisClient redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	eventID     string
 	capacity    int     // Maximum burst size
 	refillRate  float64 // Tokens per second (steady-state rate)
@@ -110,7 +110,7 @@ type TokenBucketAdmission struct {
 }
 
 // NewTokenBucketAdmission creates a new token bucket rate limiter
-func NewTokenBucketAdmission(redis *redis.Client, eventID string, logger *logrus.Logger) *TokenBucketAdmission {
+func NewTokenBucketAdmission(redis redis.UniversalClient, eventID string, logger *logrus.Logger) *TokenBucketAdmission {
 	return &TokenBucketAdmission{
 		redisClient: redis,
 		eventID:     eventID,

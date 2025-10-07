@@ -46,6 +46,10 @@ type RedisConfig struct {
 	PoolTimeout         time.Duration `envconfig:"POOL_TIMEOUT" default:"4s"`
 	TLSEnabled          bool          `envconfig:"TLS_ENABLED" default:"false"`
 	PasswordFromSecrets bool          `envconfig:"PASSWORD_FROM_SECRETS" default:"false"`
+	ClusterMode         bool          `envconfig:"CLUSTER_MODE" default:"false"`    // ElastiCache Cluster Mode Enabled
+	RouteByLatency      bool          `envconfig:"ROUTE_BY_LATENCY" default:"true"` // Route reads to fastest replica
+	RouteRandomly       bool          `envconfig:"ROUTE_RANDOMLY" default:"false"`  // Random read replica routing
+	ReadOnly            bool          `envconfig:"READ_ONLY" default:"true"`        // Prefer replicas for read commands
 }
 
 type JWTConfig struct {

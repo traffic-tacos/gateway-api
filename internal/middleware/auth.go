@@ -17,13 +17,13 @@ import (
 
 type AuthMiddleware struct {
 	config      *config.JWTConfig
-	redisClient *redis.Client
+	redisClient redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	logger      *logrus.Logger
 	jwkCache    *jwk.Cache
 	jwtSecret   string // For self-issued JWT validation
 }
 
-func NewAuthMiddleware(cfg *config.JWTConfig, redisClient *redis.Client, logger *logrus.Logger) (*AuthMiddleware, error) {
+func NewAuthMiddleware(cfg *config.JWTConfig, redisClient redis.UniversalClient, logger *logrus.Logger) (*AuthMiddleware, error) {
 	var cache *jwk.Cache
 
 	// Only initialize JWKS if endpoint is configured

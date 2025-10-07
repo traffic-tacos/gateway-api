@@ -16,12 +16,12 @@ import (
 
 type RateLimitMiddleware struct {
 	config      *config.RateLimitConfig
-	redisClient *redis.Client
+	redisClient redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	logger      *logrus.Logger
 	luaScript   string
 }
 
-func NewRateLimitMiddleware(cfg *config.RateLimitConfig, redisClient *redis.Client, logger *logrus.Logger) *RateLimitMiddleware {
+func NewRateLimitMiddleware(cfg *config.RateLimitConfig, redisClient redis.UniversalClient, logger *logrus.Logger) *RateLimitMiddleware {
 	// Token bucket Lua script for atomic operations
 	luaScript := `
 local key = KEYS[1]

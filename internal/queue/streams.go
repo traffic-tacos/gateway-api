@@ -13,12 +13,12 @@ import (
 // This solves the ordering problem that ZSet + CompositeScore couldn't solve
 // due to float64 precision limitations.
 type StreamQueue struct {
-	redis  *redis.Client
+	redis  redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	logger *logrus.Logger
 }
 
 // NewStreamQueue creates a new stream-based queue
-func NewStreamQueue(redis *redis.Client, logger *logrus.Logger) *StreamQueue {
+func NewStreamQueue(redis redis.UniversalClient, logger *logrus.Logger) *StreamQueue {
 	return &StreamQueue{
 		redis:  redis,
 		logger: logger,

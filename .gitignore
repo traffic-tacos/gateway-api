@@ -68,3 +68,5 @@ testdata/output/
 # Local configuration
 config.local.yaml
 config.local.yml
+
+logs/

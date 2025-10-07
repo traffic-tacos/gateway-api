@@ -14,15 +14,15 @@ type Manager struct {
 	Auth        *AuthMiddleware
 	Idempotency *IdempotencyMiddleware
 	RateLimit   *RateLimitMiddleware
-	RedisClient *redis.Client
+	RedisClient redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	Config      *config.Config
 	Logger      *logrus.Logger
 }
 
 // NewManager creates a new middleware manager with all middleware initialized
 func NewManager(cfg *config.Config, logger *logrus.Logger) (*Manager, error) {
-	// Initialize Redis client
-	redisClient, err := NewRedisClient(&cfg.Redis, &cfg.AWS, logger)
+	// Initialize Redis client (Universal client supports both Standalone and Cluster)
+	redisClient, err := NewRedisUniversalClient(&cfg.Redis, &cfg.AWS, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Redis client: %w", err)
 	}
