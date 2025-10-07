@@ -191,36 +191,68 @@ func NewRedisUniversalClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, 
 		logger.WithField("address", cfg.Address).Info("Redis TLS encryption enabled")
 	}
 
-	// Universal options work for both Standalone and Cluster
-	options := &redis.UniversalOptions{
-		Addrs:        []string{cfg.Address},
-		Password:     password,
-		DB:           cfg.Database, // Ignored in cluster mode
-		MaxRetries:   cfg.MaxRetries,
-		PoolSize:     cfg.PoolSize,
-		PoolTimeout:  cfg.PoolTimeout,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
-		DialTimeout:  5 * time.Second,
+	var client redis.UniversalClient
 
-		// Connection pool settings
-		MinIdleConns:    10,
-		ConnMaxIdleTime: 10 * time.Minute,
+	// 🔴 CRITICAL: Explicitly create ClusterClient or Client based on ClusterMode
+	// UniversalClient auto-detection doesn't work with single configuration endpoint
+	if cfg.ClusterMode {
+		// Cluster Mode: Use ClusterOptions
+		clusterOptions := &redis.ClusterOptions{
+			Addrs:        []string{cfg.Address}, // Configuration endpoint
+			Password:     password,
+			MaxRetries:   cfg.MaxRetries,
+			PoolSize:     cfg.PoolSize,
+			PoolTimeout:  cfg.PoolTimeout,
+			ReadTimeout:  3 * time.Second,
+			WriteTimeout: 3 * time.Second,
+			DialTimeout:  5 * time.Second,
 
-		// Retry settings
-		MinRetryBackoff: 8 * time.Millisecond,
-		MaxRetryBackoff: 512 * time.Millisecond,
+			// Connection pool settings
+			MinIdleConns:    10,
+			ConnMaxIdleTime: 10 * time.Minute,
 
-		// TLS
-		TLSConfig: tlsConfig,
+			// Retry settings
+			MinRetryBackoff: 8 * time.Millisecond,
+			MaxRetryBackoff: 512 * time.Millisecond,
 
-		// 🔴 Read Replica Optimization (only for cluster mode)
-		RouteByLatency: cfg.RouteByLatency,
-		RouteRandomly:  cfg.RouteRandomly,
-		ReadOnly:       cfg.ReadOnly,
+			// TLS
+			TLSConfig: tlsConfig,
+
+			// 🔴 Read Replica Optimization
+			RouteByLatency: cfg.RouteByLatency,
+			RouteRandomly:  cfg.RouteRandomly,
+			ReadOnly:       cfg.ReadOnly,
+
+			// Cluster topology discovery
+			MaxRedirects: 3,
+		}
+		client = redis.NewClusterClient(clusterOptions)
+	} else {
+		// Standalone Mode: Use Options
+		standaloneOptions := &redis.Options{
+			Addr:         cfg.Address,
+			Password:     password,
+			DB:           cfg.Database,
+			MaxRetries:   cfg.MaxRetries,
+			PoolSize:     cfg.PoolSize,
+			PoolTimeout:  cfg.PoolTimeout,
+			ReadTimeout:  3 * time.Second,
+			WriteTimeout: 3 * time.Second,
+			DialTimeout:  5 * time.Second,
+
+			// Connection pool settings
+			MinIdleConns:    10,
+			ConnMaxIdleTime: 10 * time.Minute,
+
+			// Retry settings
+			MinRetryBackoff: 8 * time.Millisecond,
+			MaxRetryBackoff: 512 * time.Millisecond,
+
+			// TLS
+			TLSConfig: tlsConfig,
+		}
+		client = redis.NewClient(standaloneOptions)
 	}
-
-	client := redis.NewUniversalClient(options)
 
 	// Test connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -230,15 +262,40 @@ func NewRedisUniversalClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, 
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
 
-	mode := "standalone"
-	if cfg.ClusterMode {
-		mode = "cluster"
+	// Log connection details
+	logFields := logrus.Fields{
+		"address":          cfg.Address,
+		"mode":             "standalone",
+		"route_by_latency": cfg.RouteByLatency,
+		"route_randomly":   cfg.RouteRandomly,
+		"read_only":        cfg.ReadOnly,
 	}
 
-	logger.WithFields(logrus.Fields{
-		"address": cfg.Address,
-		"mode":    mode,
-	}).Info("Connected to Redis via UniversalClient")
+	// 🔴 For Cluster Mode: discover and log topology
+	if cfg.ClusterMode {
+		logFields["mode"] = "cluster"
+
+		// Try to get cluster info (only works for ClusterClient)
+		if clusterClient, ok := client.(*redis.ClusterClient); ok {
+			nodes, err := clusterClient.ClusterNodes(ctx).Result()
+			if err == nil {
+				logger.WithField("topology_preview", nodes[:200]).Debug("Redis Cluster topology discovered")
+			}
+
+			// Count total nodes
+			slots, err := clusterClient.ClusterSlots(ctx).Result()
+			if err == nil {
+				totalNodes := 0
+				for _, slot := range slots {
+					totalNodes += len(slot.Nodes)
+				}
+				logFields["total_nodes"] = totalNodes
+				logFields["total_shards"] = len(slots)
+			}
+		}
+	}
+
+	logger.WithFields(logFields).Info("Connected to Redis successfully")
 
 	return client, nil
 }
