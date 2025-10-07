@@ -36,13 +36,13 @@ func (a *AdminHandler) FlushTestData(c *fiber.Ctx) error {
 
 	// Default patterns for test data
 	patterns := []string{
-		"queue:*",        // Queue event keys
-		"idempotency:*",  // Idempotency keys
-		"heartbeat:*",    // Heartbeat keys
-		"dedupe:*",       // Deduplication keys
-		"stream:*",       // Stream keys
-		"allow:*",        // Admission allow keys
-		"ratelimit:*",    // Rate limit keys (optional)
+		"queue:*",       // Queue event keys
+		"idempotency:*", // Idempotency keys
+		"heartbeat:*",   // Heartbeat keys
+		"dedupe:*",      // Deduplication keys
+		"stream:*",      // Stream keys
+		"allow:*",       // Admission allow keys
+		"ratelimit:*",   // Rate limit keys (optional)
 	}
 
 	// Allow custom patterns from query param
@@ -65,10 +65,10 @@ func (a *AdminHandler) FlushTestData(c *fiber.Ctx) error {
 			// Continue with other patterns even if one fails
 			continue
 		}
-		
+
 		deletedByPattern[pattern] = deleted
 		totalDeleted += deleted
-		
+
 		a.logger.WithFields(logrus.Fields{
 			"pattern": pattern,
 			"deleted": deleted,
@@ -89,6 +89,8 @@ func (a *AdminHandler) FlushTestData(c *fiber.Ctx) error {
 func (a *AdminHandler) deleteKeysByPattern(ctx context.Context, pattern string) (int, error) {
 	deleted := 0
 	
+	a.logger.WithField("pattern", pattern).Info("Starting key deletion")
+	
 	// Use SCAN to iterate through keys (cursor-based, won't block Redis)
 	iter := a.redisClient.Scan(ctx, 0, pattern, 100).Iterator()
 	
@@ -96,44 +98,60 @@ func (a *AdminHandler) deleteKeysByPattern(ctx context.Context, pattern string) 
 	for iter.Next(ctx) {
 		keys = append(keys, iter.Val())
 		
-		// Delete in batches of 1000 to avoid blocking
-		if len(keys) >= 1000 {
-			if err := a.deleteBatch(ctx, keys); err != nil {
-				return deleted, err
+		// Delete in batches of 100 (smaller for Cluster Mode compatibility)
+		if len(keys) >= 100 {
+			count, err := a.deleteBatch(ctx, keys)
+			if err != nil {
+				a.logger.WithError(err).WithField("pattern", pattern).Error("Failed to delete batch")
+				// Continue with next batch even if one fails
 			}
-			deleted += len(keys)
+			deleted += count
 			keys = []string{}
 		}
 	}
 	
 	// Delete remaining keys
 	if len(keys) > 0 {
-		if err := a.deleteBatch(ctx, keys); err != nil {
-			return deleted, err
+		count, err := a.deleteBatch(ctx, keys)
+		if err != nil {
+			a.logger.WithError(err).WithField("pattern", pattern).Error("Failed to delete remaining keys")
 		}
-		deleted += len(keys)
+		deleted += count
 	}
 	
 	if err := iter.Err(); err != nil {
+		a.logger.WithError(err).WithField("pattern", pattern).Error("SCAN iteration error")
 		return deleted, err
 	}
+	
+	a.logger.WithFields(map[string]interface{}{
+		"pattern": pattern,
+		"deleted": deleted,
+	}).Info("Completed key deletion for pattern")
 	
 	return deleted, nil
 }
 
-// deleteBatch deletes a batch of keys
-func (a *AdminHandler) deleteBatch(ctx context.Context, keys []string) error {
+// deleteBatch deletes a batch of keys (individual DEL for Cluster Mode compatibility)
+func (a *AdminHandler) deleteBatch(ctx context.Context, keys []string) (int, error) {
 	if len(keys) == 0 {
-		return nil
+		return 0, nil
 	}
 	
-	pipe := a.redisClient.Pipeline()
+	deleted := 0
+	
+	// 🔴 Redis Cluster Mode: Delete keys individually to avoid CROSSSLOT errors
+	// Pipeline doesn't work when keys are in different hash slots
 	for _, key := range keys {
-		pipe.Del(ctx, key)
+		result, err := a.redisClient.Del(ctx, key).Result()
+		if err != nil {
+			a.logger.WithError(err).WithField("key", key).Warn("Failed to delete key")
+			continue
+		}
+		deleted += int(result)
 	}
 	
-	_, err := pipe.Exec(ctx)
-	return err
+	return deleted, nil
 }
 
 // HealthCheck returns service health status
@@ -153,7 +171,7 @@ func (a *AdminHandler) HealthCheck(c *fiber.Ctx) error {
 	if err := a.redisClient.Ping(ctx).Err(); err != nil {
 		a.logger.WithError(err).Error("Redis health check failed")
 		redisStatus = "unhealthy"
-		
+
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"status": "unhealthy",
 			"redis":  redisStatus,
@@ -191,7 +209,7 @@ func (a *AdminHandler) GetStats(c *fiber.Ctx) error {
 	// Count keys by pattern
 	patterns := []string{"queue:*", "idempotency:*", "heartbeat:*", "dedupe:*", "stream:*"}
 	keyCount := make(map[string]int64)
-	
+
 	for _, pattern := range patterns {
 		// Use SCAN with COUNT to estimate
 		iter := a.redisClient.Scan(ctx, 0, pattern, 10).Iterator()
