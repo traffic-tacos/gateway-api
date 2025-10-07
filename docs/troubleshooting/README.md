@@ -5,18 +5,26 @@ Gateway API의 운영 중 발생할 수 있는 문제들과 해결 방법을 정
 ## 📚 문서 목록
 
 ### Redis 관련
+- **[REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md](./REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md)** - 🔴 **필독!** Redis UniversalClient 자동 감지 실패 문제
+  - **증상**: `QUEUE_ERROR: Failed to join queue` (Hash tag 적용 후에도 500 에러)
+  - **원인**: UniversalClient가 Configuration Endpoint(1개 주소)를 Standalone으로 오인
+  - **해결**: ClusterMode 플래그 기반으로 명시적 ClusterClient 사용
+
 - **[REDIS_CLUSTER_HASH_TAG_FIX.md](./REDIS_CLUSTER_HASH_TAG_FIX.md)** - Redis Cluster Mode에서 Lua Script 실행 실패 문제
   - **증상**: `QUEUE_ERROR: Failed to join queue`
   - **원인**: Hash Tag 미사용으로 인한 CROSSSLOT 에러
   - **해결**: dedupeKey에 `{eventID}` hash tag 추가
+  - **참고**: 이 수정은 필요하지만, UniversalClient 문제가 함께 해결되어야 작동함
 
 ## 🔍 문제 유형별 찾기
 
 ### API 에러
-- Queue Join 실패 → [REDIS_CLUSTER_HASH_TAG_FIX.md](./REDIS_CLUSTER_HASH_TAG_FIX.md)
+- Queue Join 실패 (500 에러) → 🔴 **[REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md](./REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md)** (근본 원인)
+- Queue Join 실패 (CROSSSLOT 에러) → [REDIS_CLUSTER_HASH_TAG_FIX.md](./REDIS_CLUSTER_HASH_TAG_FIX.md) (부분 해결)
 
 ### 인프라 에러
-- Redis 연결 실패 → (작성 예정)
+- Redis Cluster 연결 실패 → [REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md](./REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md)
+- Redis Cluster 명령어 사용 불가 → [REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md](./REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md)
 - ElastiCache AUTH 에러 → (작성 예정)
 
 ### 성능 문제
