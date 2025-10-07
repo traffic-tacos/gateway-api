@@ -107,7 +107,8 @@ func (q *QueueHandler) Join(c *fiber.Ctx) error {
 	ctx := context.Background()
 
 	// Atomic enqueue with deduplication using Lua Script
-	dedupeKey := fmt.Sprintf("dedupe:%s", idempotencyKey)
+	// 🔴 Use hash tag {eventID} to ensure both keys are in the same Redis Cluster slot
+	dedupeKey := fmt.Sprintf("dedupe:{%s}:%s", req.EventID, idempotencyKey)
 	streamKey := fmt.Sprintf("stream:event:{%s}:user:%s", req.EventID, req.UserID)
 
 	result, err := q.luaExecutor.EnqueueAtomic(
