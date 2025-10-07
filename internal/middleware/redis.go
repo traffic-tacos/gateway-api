@@ -201,15 +201,16 @@ func NewRedisUniversalClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, 
 			Addrs:        []string{cfg.Address}, // Configuration endpoint
 			Password:     password,
 			MaxRetries:   cfg.MaxRetries,
-			PoolSize:     cfg.PoolSize,
-			PoolTimeout:  cfg.PoolTimeout,
+			PoolSize:     cfg.PoolSize,    // 🔴 Now defaults to 1000 for 30k RPS
+			PoolTimeout:  cfg.PoolTimeout, // 🔴 Now defaults to 10s
 			ReadTimeout:  3 * time.Second,
 			WriteTimeout: 3 * time.Second,
 			DialTimeout:  5 * time.Second,
 
 			// Connection pool settings
-			MinIdleConns:    10,
+			MinIdleConns:    cfg.MinIdleConns, // 🔴 Now configurable (default: 100)
 			ConnMaxIdleTime: 10 * time.Minute,
+			ConnMaxLifetime: cfg.MaxConnAge, // 🔴 Connection refresh (default: 30m)
 
 			// Retry settings
 			MinRetryBackoff: 8 * time.Millisecond,
@@ -234,15 +235,16 @@ func NewRedisUniversalClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, 
 			Password:     password,
 			DB:           cfg.Database,
 			MaxRetries:   cfg.MaxRetries,
-			PoolSize:     cfg.PoolSize,
-			PoolTimeout:  cfg.PoolTimeout,
+			PoolSize:     cfg.PoolSize,    // 🔴 Now defaults to 1000 for 30k RPS
+			PoolTimeout:  cfg.PoolTimeout, // 🔴 Now defaults to 10s
 			ReadTimeout:  3 * time.Second,
 			WriteTimeout: 3 * time.Second,
 			DialTimeout:  5 * time.Second,
 
 			// Connection pool settings
-			MinIdleConns:    10,
+			MinIdleConns:    cfg.MinIdleConns, // 🔴 Now configurable (default: 100)
 			ConnMaxIdleTime: 10 * time.Minute,
+			ConnMaxLifetime: cfg.MaxConnAge, // 🔴 Connection refresh (default: 30m)
 
 			// Retry settings
 			MinRetryBackoff: 8 * time.Millisecond,
