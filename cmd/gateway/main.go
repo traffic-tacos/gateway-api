@@ -58,8 +58,6 @@ import (
 // @name Authorization
 // @description Type "Bearer" followed by a space and JWT token.
 
-var tracer = otel.Tracer("fiber-server")
-
 func main() {
 	// Load configuration
 	cfg, err := config.Load()
