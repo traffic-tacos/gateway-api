@@ -32,6 +32,7 @@ func Setup(app *fiber.App, cfg *config.Config, logger *logrus.Logger, middleware
 	reservationHandler := NewReservationHandler(reservationClient, logger)
 	paymentHandler := NewPaymentHandler(paymentClient, logger)
 	authHandler := NewAuthHandler(dynamoClient, cfg.DynamoDB.UsersTableName, cfg.JWT.Secret, logger)
+	adminHandler := NewAdminHandler(middlewareManager.RedisClient, logger)
 
 	// Health check endpoints (no auth required)
 	app.Get("/healthz", healthCheck)
@@ -64,6 +65,12 @@ func Setup(app *fiber.App, cfg *config.Config, logger *logrus.Logger, middleware
 	queueRoutes.Get("/status", queueHandler.Status)
 	queueRoutes.Post("/enter", queueHandler.Enter)
 	queueRoutes.Delete("/leave", queueHandler.Leave)
+
+	// Admin routes (public for PoC testing - consider adding auth for production)
+	adminRoutes := api.Group("/admin")
+	adminRoutes.Post("/flush-test-data", adminHandler.FlushTestData)
+	adminRoutes.Get("/health", adminHandler.HealthCheck)
+	adminRoutes.Get("/stats", adminHandler.GetStats)
 
 	// Protected routes (require authentication)
 	// Auth 미들웨어를 보호된 라우트에만 적용
