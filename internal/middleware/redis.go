@@ -75,8 +75,8 @@ func NewRedisClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, logger *l
 
 	rdb := redis.NewClient(options)
 
-	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Test connection (with extended timeout for stable Pod initialization)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.DialTimeout)
 	defer cancel()
 
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -144,7 +144,7 @@ func newRedisClusterClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, lo
 	clusterClient := redis.NewClusterClient(options)
 
 	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.DialTimeout)
 	defer cancel()
 
 	if err := clusterClient.Ping(ctx).Err(); err != nil {
@@ -201,16 +201,16 @@ func NewRedisUniversalClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, 
 			Addrs:        []string{cfg.Address}, // Configuration endpoint
 			Password:     password,
 			MaxRetries:   cfg.MaxRetries,
-			PoolSize:     cfg.PoolSize,    // 🔴 Now defaults to 1000 for 30k RPS
-			PoolTimeout:  cfg.PoolTimeout, // 🔴 Now defaults to 10s
-			ReadTimeout:  3 * time.Second,
-			WriteTimeout: 3 * time.Second,
-			DialTimeout:  5 * time.Second,
+			PoolSize:     cfg.PoolSize,     // ✅ Optimized for 30k RPS: 150 per pod (70 pods × 150 = 10.5k connections)
+			PoolTimeout:  cfg.PoolTimeout,  // ✅ Increased: 20s (was 10s)
+			ReadTimeout:  cfg.ReadTimeout,  // ✅ Configurable: 10s
+			WriteTimeout: cfg.WriteTimeout, // ✅ Configurable: 10s
+			DialTimeout:  cfg.DialTimeout,  // ✅ NEW: 20s for stable Pod initialization
 
 			// Connection pool settings
-			MinIdleConns:    cfg.MinIdleConns, // 🔴 Now configurable (default: 100)
+			MinIdleConns:    cfg.MinIdleConns, // ✅ 20% of pool size: 30 (warm connections)
 			ConnMaxIdleTime: 10 * time.Minute,
-			ConnMaxLifetime: cfg.MaxConnAge, // 🔴 Connection refresh (default: 30m)
+			ConnMaxLifetime: cfg.MaxConnAge, // Connection refresh (default: 30m)
 
 			// Retry settings
 			MinRetryBackoff: 8 * time.Millisecond,
@@ -235,16 +235,16 @@ func NewRedisUniversalClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, 
 			Password:     password,
 			DB:           cfg.Database,
 			MaxRetries:   cfg.MaxRetries,
-			PoolSize:     cfg.PoolSize,    // 🔴 Now defaults to 1000 for 30k RPS
-			PoolTimeout:  cfg.PoolTimeout, // 🔴 Now defaults to 10s
-			ReadTimeout:  3 * time.Second,
-			WriteTimeout: 3 * time.Second,
-			DialTimeout:  5 * time.Second,
+			PoolSize:     cfg.PoolSize,     // ✅ Optimized for 30k RPS: 150 per pod (70 pods × 150 = 10.5k connections)
+			PoolTimeout:  cfg.PoolTimeout,  // ✅ Increased: 20s (was 10s)
+			ReadTimeout:  cfg.ReadTimeout,  // ✅ Configurable: 10s
+			WriteTimeout: cfg.WriteTimeout, // ✅ Configurable: 10s
+			DialTimeout:  cfg.DialTimeout,  // ✅ NEW: 20s for stable Pod initialization
 
 			// Connection pool settings
-			MinIdleConns:    cfg.MinIdleConns, // 🔴 Now configurable (default: 100)
+			MinIdleConns:    cfg.MinIdleConns, // ✅ 20% of pool size: 30 (warm connections)
 			ConnMaxIdleTime: 10 * time.Minute,
-			ConnMaxLifetime: cfg.MaxConnAge, // 🔴 Connection refresh (default: 30m)
+			ConnMaxLifetime: cfg.MaxConnAge, // Connection refresh (default: 30m)
 
 			// Retry settings
 			MinRetryBackoff: 8 * time.Millisecond,
@@ -257,7 +257,7 @@ func NewRedisUniversalClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, 
 	}
 
 	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.DialTimeout)
 	defer cancel()
 
 	if err := client.Ping(ctx).Err(); err != nil {

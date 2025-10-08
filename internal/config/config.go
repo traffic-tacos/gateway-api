@@ -42,10 +42,13 @@ type RedisConfig struct {
 	Password            string        `envconfig:"PASSWORD" default:""`
 	Database            int           `envconfig:"DATABASE" default:"0"`
 	MaxRetries          int           `envconfig:"MAX_RETRIES" default:"3"`
-	PoolSize            int           `envconfig:"POOL_SIZE" default:"1000"`     // 🔴 Increased for 30k RPS (was 100)
-	PoolTimeout         time.Duration `envconfig:"POOL_TIMEOUT" default:"10s"`   // 🔴 Increased timeout (was 4s)
-	MinIdleConns        int           `envconfig:"MIN_IDLE_CONNS" default:"100"` // 🔴 Keep connections warm
-	MaxConnAge          time.Duration `envconfig:"MAX_CONN_AGE" default:"30m"`   // 🔴 Connection refresh
+	PoolSize            int           `envconfig:"POOL_SIZE" default:"150"`     // ✅ Optimized for 30k RPS: 428 RPS/pod
+	PoolTimeout         time.Duration `envconfig:"POOL_TIMEOUT" default:"20s"`  // ✅ Increased: 10s → 20s
+	MinIdleConns        int           `envconfig:"MIN_IDLE_CONNS" default:"30"` // ✅ 20% of pool size for warm connections
+	MaxConnAge          time.Duration `envconfig:"MAX_CONN_AGE" default:"30m"`  // Connection refresh
+	DialTimeout         time.Duration `envconfig:"DIAL_TIMEOUT" default:"20s"`  // ✅ NEW: Pod initialization timeout
+	ReadTimeout         time.Duration `envconfig:"READ_TIMEOUT" default:"10s"`  // ✅ NEW: Redis read timeout
+	WriteTimeout        time.Duration `envconfig:"WRITE_TIMEOUT" default:"10s"` // ✅ NEW: Redis write timeout
 	TLSEnabled          bool          `envconfig:"TLS_ENABLED" default:"false"`
 	PasswordFromSecrets bool          `envconfig:"PASSWORD_FROM_SECRETS" default:"false"`
 	ClusterMode         bool          `envconfig:"CLUSTER_MODE" default:"false"`    // ElastiCache Cluster Mode Enabled
