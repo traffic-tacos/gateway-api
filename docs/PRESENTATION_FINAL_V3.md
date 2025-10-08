@@ -1,0 +1,1847 @@
+# Traffic Tacos: 30k RPS 티켓팅 시스템
+## 트래픽 · 보안 · FinOps · 관측성 · 부하테스트
+
+---
+
+## 📋 **발표 구조**
+
+```
+Part 1: 트래픽 처리 (15분) - 아키텍처 설계부터 30k RPS 달성까지
+Part 2: 보안 (5분) - JWT, Rate Limiting, 봇 방어
+Part 3: FinOps (5분) - 비용 최적화 전략
+Part 4: 관측성 (5분) - CloudWatch + pprof로 병목 찾기
+Part 5: 부하테스트 (5분) - 1k → 30k RPS + Karpenter 확장
+Part 6: Lesson Learned (5분) - 설계 교훈 및 실전 팁
+
+총 40분 (Q&A 포함 50분)
+```
+
+---
+
+# 🌊 Part 1: 트래픽 처리 (15분)
+
+## 📜 1.1 문제 정의
+
+### 슬라이드
+```
+"인기 콘서트 티켓팅, 예매 오픈 순간"
+
+30만 명이 동시에 접속
+    ↓
+초당 수만 건의 요청 폭주
+    ↓
+좌석은 1만 석뿐
+    ↓
+
+문제:
+├─ 30만 명을 어떻게 처리할 것인가?
+├─ 1만 석을 어떻게 공정하게 분배할 것인가?
+├─ 시스템은 어떻게 버틸 것인가?
+└─ 비용은 얼마나 들 것인가?
+```
+
+### 멘트
+
+인기 콘서트 티켓팅을 생각해 보세요.
+
+예매 오픈 직전, **30만 명이 동시에 대기**합니다.
+오픈과 동시에 **초당 수만 건의 요청**이 몰려옵니다.
+하지만 좌석은 **1만 석**뿐입니다.
+
+이때 우리가 풀어야 할 문제는 무엇일까요?
+
+**첫째, 트래픽 처리**
+- 30만 명의 동시 접속을 어떻게 받을 것인가?
+- 서버가 터지지 않으려면?
+
+**둘째, 공정성**
+- 누가 먼저 들어왔는지 어떻게 판단할 것인가?
+- 봇이 아닌 실제 사용자를 어떻게 보호할 것인가?
+
+**셋째, 재고 관리**
+- 1만 석을 어떻게 오버셀 없이 판매할 것인가?
+- 동시에 같은 좌석을 선택하면?
+
+**넷째, 비용**
+- 짧은 피크 때문에 인프라를 얼마나 증설해야 하나?
+- 평상시에는 자원이 놀지 않을까?
+
+이 모든 문제를 어떻게 풀 것인가?
+그것이 오늘의 주제입니다.
+
+---
+
+## 📜 1.2 아키텍처 선택지
+
+### 슬라이드
+```
+"3가지 아키텍처 패턴"
+
+패턴 1: Direct Access (직접 접근)
+Browser → Reservation API → Inventory API → DB
+✅ 단순함
+❌ DB가 터짐, 오버셀 위험, 봇 방어 안됨
+
+패턴 2: Queue Service (외부 큐)
+Browser → SQS/SNS → Lambda → Reservation API
+✅ 비동기 처리
+❌ 응답 지연, 사용자 경험 나쁨, 비용 높음
+
+패턴 3: Gateway + Admission Control (입장 제어)
+Browser → Gateway (대기열) → Reservation API
+✅ 실시간 응답, 제어 가능, 공정성 보장
+❌ Gateway 부하 집중 (Trade-off)
+```
+
+### 멘트
+
+30만 명의 트래픽을 처리하는 방법에는 크게 3가지가 있습니다.
+
+**패턴 1: Direct Access - 직접 접근**
+```
+Browser → Reservation API → Inventory API → DB
+```
+
+가장 단순한 방법입니다.
+하지만 문제가 많습니다.
+- 30만 명이 동시에 DB를 치면? → **DB가 터집니다**
+- 동시에 같은 좌석을 선택하면? → **오버셀 발생**
+- 봇 트래픽은? → **방어 불가능**
+
+**패턴 2: Queue Service - 외부 큐 서비스**
+```
+Browser → SQS/SNS → Lambda → Reservation API
+```
+
+비동기 처리로 부하를 분산합니다.
+하지만 이것도 문제가 있습니다.
+- 사용자는 언제 처리되는지 모릅니다 → **응답 지연**
+- 실시간 피드백이 없습니다 → **사용자 경험 나쁨**
+- Lambda 호출 비용이 폭발합니다 → **비용 높음**
+
+**패턴 3: Gateway + Admission Control - 입장 제어**
+```
+Browser → Gateway (대기열 관리) → Reservation API
+```
+
+Gateway에서 대기열을 관리하고, 입장을 제어합니다.
+- 사용자는 자신의 순번을 **실시간으로 확인**
+- Gateway가 입장을 제어해서 **뒷단 보호**
+- 공정성을 **보장**
+
+하지만 Trade-off가 있습니다.
+- **Gateway에 부하가 집중**됩니다
+- Gateway가 **SPOF(Single Point of Failure)**가 될 수 있습니다
+
+우리는 **패턴 3**을 선택했습니다.
+왜 그랬을까요?
+
+---
+
+## 📜 1.3 왜 Gateway + 입장 제어인가?
+
+### 슬라이드
+```
+"우리의 설계 철학"
+
+핵심 원칙 3가지:
+
+1️⃣ 실시간 피드백
+   "지금 몇 번째인지 알려줘야 한다"
+   → Gateway에서 실시간 순번 제공
+
+2️⃣ 뒷단 보호
+   "DB와 API는 터지면 안 된다"
+   → Gateway에서 입장 제어 (Rate Limiting)
+
+3️⃣ 공정성 보장
+   "먼저 온 사람이 먼저 들어가야 한다"
+   → 대기열 순서 관리
+
+
+Trade-off 수용:
+✅ Gateway 부하 집중 → 이건 받아들이자
+✅ Gateway 최적화 → 여기에 집중 투자하자
+```
+
+### 멘트
+
+우리가 Gateway + 입장 제어를 선택한 이유는 명확합니다.
+
+**첫째, 실시간 피드백이 필수였습니다.**
+티켓팅 사용자는 "지금 몇 번째인지" 알고 싶어 합니다.
+비동기 큐 방식으로는 이게 불가능합니다.
+Gateway에서 대기열을 관리하면, 실시간으로 순번을 알려줄 수 있습니다.
+
+**둘째, 뒷단 보호가 필수였습니다.**
+30만 명이 동시에 DB를 치면, DB가 터집니다.
+Reservation API가 동시에 1만 건을 처리하면, API가 터집니다.
+Gateway에서 입장을 제어하면, 뒷단을 보호할 수 있습니다.
+- 예: 초당 1,000명만 입장 허용
+- Reservation API는 1,000 RPS만 받음
+- 안전합니다
+
+**셋째, 공정성이 필수였습니다.**
+먼저 온 사람이 먼저 들어가야 합니다.
+Gateway에서 대기열 순서를 관리하면, 공정성을 보장할 수 있습니다.
+
+**하지만 Trade-off가 있습니다.**
+Gateway에 부하가 집중됩니다.
+Gateway가 터지면, 전체 시스템이 마비됩니다.
+
+우리는 이 Trade-off를 **수용**하기로 했습니다.
+대신, **Gateway 최적화에 집중 투자**하기로 했습니다.
+
+---
+
+## 📜 1.4 Gateway + Redis 설계
+
+### 슬라이드
+```
+"왜 Redis인가?"
+
+대기열 관리에 필요한 것:
+├─ 빠른 조회 (ms 단위)
+├─ 순서 보장 (FIFO)
+├─ 원자적 연산 (동시성 제어)
+├─ TTL 자동 관리 (만료 처리)
+└─ 분산 환경 지원
+
+
+Redis의 강점:
+✅ O(log N) 조회 (ZSET)
+✅ Lua Script (원자성)
+✅ TTL 자동 만료
+✅ Cluster Mode (확장성)
+✅ Read Replica (읽기 분산)
+
+
+다른 선택지는?
+❌ DynamoDB: 읽기/쓰기 비용 높음, 조회 느림
+❌ PostgreSQL: 동시성 제어 어려움, 확장성 부족
+❌ In-Memory: 분산 환경 지원 안됨, 데이터 유실
+```
+
+### 멘트
+
+그렇다면, 왜 Redis를 선택했을까요?
+
+대기열 관리에 필요한 것들을 나열해 봤습니다.
+- **빠른 조회**: 사용자는 5초마다 순번을 조회합니다. ms 단위 응답 필요.
+- **순서 보장**: 먼저 온 사람이 먼저 들어가야 합니다.
+- **원자적 연산**: 동시에 여러 명이 들어와도, 순서가 꼬이면 안 됩니다.
+- **TTL 자동 관리**: 비활성 사용자는 자동으로 제거되어야 합니다.
+- **분산 환경**: Gateway 인스턴스가 여러 개여도 작동해야 합니다.
+
+Redis는 이 모든 요구사항을 만족합니다.
+- **ZSET**: O(log N) 조회, 순서 보장
+- **Lua Script**: 원자적 연산 (ACID 보장)
+- **TTL**: 자동 만료 처리
+- **Cluster Mode**: 샤드 분산으로 확장성
+- **Read Replica**: 읽기 부하 분산
+
+**다른 선택지는 없었나요?**
+
+**DynamoDB?**
+- 쓰기 비용이 너무 높습니다 (30만 건 쓰기 = $$$$)
+- 읽기도 느립니다 (수십 ms)
+- 순서 보장이 어렵습니다
+
+**PostgreSQL?**
+- 동시성 제어가 어렵습니다 (Lock 경합)
+- 확장성이 부족합니다 (수직 확장만 가능)
+
+**In-Memory (map)?**
+- 분산 환경을 지원하지 않습니다
+- 인스턴스가 죽으면 데이터 유실
+
+**결론: Redis가 최적이었습니다.**
+
+---
+
+## 📜 1.5 설계 구조 및 용량 산정
+
+### 슬라이드
+```
+"Gateway + Redis 아키텍처"
+
+Browser (30만 명)
+    ↓
+    ↓ Queue API (대기열)
+    ↓ - Join: 대기열 참여
+    ↓ - Status: 순번 조회 (5초마다)
+    ↓ - Enter: 입장 시도
+    ↓
+┌─────────────────────────────────┐
+│  Gateway API (Go + Fiber)       │
+│  ┌──────────────────────────┐   │
+│  │  Redis (ElastiCache)     │   │
+│  │  - ZSET: 순서 관리       │   │
+│  │  - Lua: 원자적 연산      │   │
+│  │  - TTL: 자동 만료        │   │
+│  └──────────────────────────┘   │
+│                                  │
+│  입장 제어 (1,000 RPS)          │ ← 왜 1,000 RPS?
+└─────────────────────────────────┘
+    ↓
+    ↓ 입장 허용된 사용자만 통과
+    ↓
+┌─────────────────────────────────┐
+│  Backend Services               │
+│  - Reservation API (예약)       │
+│  - Inventory API (재고)         │
+│  - Payment API (결제)           │
+└─────────────────────────────────┘
+    ↓
+DynamoDB (영구 저장)
+```
+
+### 멘트
+
+우리가 설계한 아키텍처입니다.
+
+**Browser (30만 명)**
+- 티켓팅 오픈 시 대기
+- 5초마다 자신의 순번 조회 (Polling)
+- 순번이 되면 입장 시도
+
+**Gateway API (Go + Fiber)**
+- Queue API 제공:
+  - `POST /queue/join`: 대기열 참여
+  - `GET /queue/status`: 순번 조회
+  - `POST /queue/enter`: 입장 시도
+- Redis로 대기열 관리
+- 입장 제어: 초당 1,000명만 허용
+
+**Redis (ElastiCache)**
+- **ZSET**: 대기열 순서 관리 (timestamp 기반)
+- **Lua Script**: 원자적 Enqueue/Dequeue
+- **TTL**: 비활성 사용자 자동 제거 (Heartbeat 기반)
+
+**Backend Services**
+- 입장 허용된 사용자만 접근 가능
+- Reservation API: 예약 생성 및 관리
+- Inventory API: 재고 차감 (오버셀 방지)
+- Payment API: 결제 처리
+
+**DynamoDB**
+- 예약/주문 데이터 영구 저장
+- 쓰기는 초당 1,000건만 (Gateway 제어 덕분)
+
+**핵심 아이디어:**
+Gateway + Redis가 **방파제** 역할을 합니다.
+30만 명의 트래픽을 받아내고,
+뒷단은 안전하게 보호됩니다.
+
+---
+
+## 📜 1.6 왜 1,000 RPS로 입장 제어를 했는가?
+
+### 슬라이드
+```
+"입장 제어 용량 산정"
+
+질문: "왜 하필 1,000 RPS인가?"
+
+용량 산정 과정:
+
+1️⃣ 좌석 수 기준
+   - 티켓: 10,000석
+   - 판매 시간: 30분 이내 목표
+   - 필요 처리량: 10,000석 ÷ 1,800초 = 5.5 RPS
+   → 너무 느림 ❌
+
+2️⃣ 사용자 경험 기준
+   - 30만 명 대기
+   - 평균 대기 시간: 5분 이내 목표
+   - 필요 처리량: 300,000명 ÷ 300초 = 1,000 RPS
+   → 적절함 ✅
+
+3️⃣ Backend 처리 능력 검증
+   - Reservation API: 3,000 RPS 가능 (부하 테스트 결과)
+   - Inventory API: 5,000 RPS 가능 (gRPC 고성능)
+   - DynamoDB: On-demand 모드 (무제한)
+   → 1,000 RPS는 여유로움 ✅
+
+4️⃣ 비용 고려
+   - DynamoDB 쓰기: $1.25 per 1M writes
+   - 1,000 RPS = 3,600,000 writes/hour
+   - 30분 = 1,800,000 writes = $2.25
+   → 감당 가능 ✅
+
+결론: 1,000 RPS가 최적!
+```
+
+### 멘트
+
+여기서 중요한 질문이 하나 있습니다.
+**"왜 하필 1,000 RPS로 입장 제어를 했는가?"**
+
+이 숫자는 아무렇게나 정한 게 아닙니다.
+용량 산정 과정을 거쳤습니다.
+
+**첫째, 좌석 수 기준으로 계산했습니다.**
+- 티켓: 10,000석
+- 판매 시간: 30분 이내 목표
+- 필요 처리량: 10,000석 ÷ 1,800초 = **5.5 RPS**
+
+하지만 이건 너무 느립니다.
+30만 명이 5분 넘게 기다려야 합니다.
+사용자 경험이 나쁩니다.
+
+**둘째, 사용자 경험 기준으로 계산했습니다.**
+- 30만 명이 대기 중
+- 평균 대기 시간: 5분 이내 목표
+- 필요 처리량: 300,000명 ÷ 300초 = **1,000 RPS**
+
+이게 더 합리적입니다.
+5분이면 사용자가 견딜 만한 시간입니다.
+
+**셋째, Backend가 처리할 수 있는지 검증했습니다.**
+- **Reservation API**: 사전 부하 테스트 결과 3,000 RPS 가능
+- **Inventory API**: gRPC 고성능으로 5,000 RPS 가능
+- **DynamoDB**: On-demand 모드로 무제한 확장 가능
+
+1,000 RPS는 Backend 입장에서 매우 여유롭습니다.
+30% 수준의 부하입니다.
+
+**넷째, 비용을 고려했습니다.**
+- DynamoDB 쓰기 비용: $1.25 per 1M writes
+- 1,000 RPS = 3,600,000 writes/hour
+- 30분 티켓팅 = 1,800,000 writes = **$2.25**
+
+감당 가능한 비용입니다.
+
+**결론:**
+1,000 RPS가 **사용자 경험, Backend 용량, 비용** 측면에서 최적의 균형점이었습니다.
+
+이 숫자 하나를 정하는 데도,
+이렇게 많은 고민이 들어갑니다.
+
+---
+
+## 📜 1.7 Redis 인스턴스 선정
+
+### 슬라이드
+```
+"ElastiCache 인스턴스 크기 결정"
+
+질문: "어떤 Redis 인스턴스를 써야 하나?"
+
+고려 사항:
+
+1️⃣ 메모리 요구량
+   - 대기열 데이터: 30만 명 × 1KB = 300MB
+   - 인덱스 데이터: ZSET × 5 = 150MB
+   - 버퍼: 2배 여유 = 900MB
+   → 최소 2GB 이상 필요
+
+2️⃣ 네트워크 처리량
+   - Status API: 30만 명 × 0.2 RPS = 60k RPS
+   - 각 요청: 1KB 응답
+   - 필요 대역폭: 60MB/s
+   → 네트워크 성능 중요
+
+3️⃣ CPU 처리 능력
+   - ZRANK 연산: O(log N)
+   - 60k RPS × 0.01ms = 600ms CPU
+   → 멀티 코어 필요
+
+4️⃣ 가용성 및 확장성
+   - Cluster Mode: 5 shards (데이터 분산)
+   - Read Replica: 각 샤드당 1개 (읽기 분산)
+   - 총 10 nodes
+   → 고가용성 + 성능
+
+선택: cache.m7g.xlarge (4 vCPU, 13GB RAM)
+       × 5 shards × 2 (replica) = 10 nodes
+```
+
+### 멘트
+
+아키텍처를 설계했으니, 이제 실제 인스턴스를 선택해야 합니다.
+
+**"어떤 Redis 인스턴스를 써야 하나?"**
+
+**첫째, 메모리 요구량을 계산했습니다.**
+- 대기열 데이터: 30만 명 × 1KB (토큰 + 메타데이터) = 300MB
+- Position Index: ZSET 구조 × 5개 이벤트 = 150MB
+- 버퍼 및 기타: 2배 여유분 = 450MB
+- 총합: 약 900MB
+
+최소 2GB 이상의 메모리가 필요합니다.
+
+**둘째, 네트워크 처리량을 계산했습니다.**
+- Status API: 30만 명이 5초마다 조회 = 60k RPS
+- 각 요청당 응답: 약 1KB (순번 + 메타데이터)
+- 필요 네트워크 대역폭: 60MB/s
+
+네트워크 성능이 중요합니다.
+
+**셋째, CPU 처리 능력을 예측했습니다.**
+- ZRANK 연산: O(log N) = log(300,000) ≈ 18 비교
+- 60k RPS × 0.01ms = 600ms CPU 시간/초
+- 멀티 코어가 필요합니다
+
+**넷째, 가용성과 확장성을 고려했습니다.**
+- **Cluster Mode**: 5개 샤드로 데이터 분산
+  - 각 샤드: 60MB 메모리, 12k RPS 처리
+- **Read Replica**: 각 샤드당 1개 복제본
+  - 읽기 부하 분산
+  - 장애 대응 (자동 failover)
+- **총 10 nodes**: 5 primary + 5 replica
+
+**선택: cache.m7g.xlarge**
+- vCPU: 4 (충분한 처리 능력)
+- 메모리: 13GB (여유롭게)
+- 네트워크: 최대 12.5 Gbps (125MB/s)
+- ARM64 Graviton: 비용 효율적
+
+**구성: 5 shards × 2 (primary + replica) = 10 nodes**
+
+이 구성으로 60k RPS Status API를 처리할 수 있습니다.
+그리고 실제로는... 30k RPS도 충분합니다.
+
+---
+
+## 📜 1.8 초기 구현 및 테스트
+
+### 슬라이드
+```
+"1차 부하 테스트: 1,000 RPS"
+
+┌────────────────────────────────┐
+│ Component       │ CPU  │ Result │
+├────────────────────────────────┤
+│ Gateway API     │ 5%   │ ✅      │
+│ Redis           │ 10%  │ ✅      │
+│ Reservation API │ 3%   │ ✅      │
+│ DynamoDB        │ 5%   │ ✅      │
+└────────────────────────────────┘
+
+모든 컴포넌트: 여유로움
+결론: 아키텍처가 작동한다! 🎉
+
+다음 목표: 10,000 RPS
+```
+
+### 멘트
+
+초기 구현을 마치고, 첫 부하 테스트를 돌렸습니다.
+**1,000 RPS**로 시작했습니다.
+
+결과는 완벽했습니다.
+- Gateway API: CPU 5%
+- Redis: CPU 10%
+- Reservation API: CPU 3%
+- DynamoDB: 쓰기 5%
+
+모든 컴포넌트가 여유로웠습니다.
+
+"**좋아, 아키텍처가 작동한다!**"
+
+이제 목표는 **10,000 RPS**입니다.
+점진적으로 부하를 올려보기로 했습니다.
+
+---
+
+## 📜 1.9 10k RPS에서 병목 발견
+
+### 슬라이드
+```
+"10,000 RPS 부하 테스트 결과"
+
+┌─────────────────────────────────────────┐
+│ Component          │ CPU    │ Status   │
+├─────────────────────────────────────────┤
+│ Gateway API        │ 15%    │ ✅ OK     │
+│ Reservation API    │ 5%     │ ✅ OK     │
+│ Inventory API      │ 3%     │ ✅ OK     │
+│ Payment API        │ 2%     │ ✅ OK     │
+│ DynamoDB          │ 10%    │ ✅ OK     │
+├─────────────────────────────────────────┤
+│ ElastiCache Redis  │ 100%   │ 🔴 병목!  │
+└─────────────────────────────────────────┘
+
+예상: "Gateway가 터질 줄 알았는데..."
+실제: "Redis가 터졌네?"
+
+
+왜? 🤔
+```
+
+### 멘트
+
+부하를 10,000 RPS로 올렸습니다.
+
+그리고 모니터링을 확인하는 순간,
+예상과 다른 결과를 발견했습니다.
+
+**Gateway API**: CPU 15% - 여전히 여유롭습니다.
+**Reservation API**: CPU 5% - 놀고 있습니다.
+**Inventory API**: CPU 3% - 더 놀고 있습니다.
+**DynamoDB**: 10% - 문제없습니다.
+
+그런데 딱 하나,
+**ElastiCache Redis: CPU 100%** 🔴
+
+예상했던 것과 달랐습니다.
+우리는 "Gateway가 터질 줄" 알았습니다.
+하지만 터진 건 Redis였습니다.
+
+**왜 이런 일이 벌어진 걸까요?**
+
+Gateway에 부하를 집중시키는 설계였으니,
+Redis에 부하가 집중되는 건 어쩌면 당연한 결과였습니다.
+
+하지만 **10,000 RPS에서 이미 한계**라니,
+30,000 RPS 목표는 요원해 보였습니다.
+
+**문제를 찾아야 했습니다.**
+
+---
+
+## 📜 1.10 병목의 근본 원인 (관측성)
+
+### 슬라이드
+```
+"Redis CPU 100%, 왜?"
+
+CloudWatch 메트릭 분석:
+├─ CommandsProcessed: 초당 10만+ 건
+├─ NetworkBytesIn: 비정상적으로 높음
+└─ EngineCPUUtilization: 지속적 100%
+
+pprof 프로파일링:
+├─ calculateGlobalPosition() 함수
+├─ Redis KEYS 명령어 호출
+└─ 초당 10,000번 실행!
+
+
+Redis KEYS 명령어:
+❌ O(N) 시간 복잡도 (모든 키 스캔)
+❌ Blocking operation (다른 명령어 대기)
+❌ Cluster Mode에서 모든 샤드 스캔
+❌ 10k RPS = 초당 1만번 KEYS 실행!
+
+
+범인: Status API
+```
+
+### 멘트
+
+Redis CPU 100%의 원인을 찾아야 했습니다.
+
+**첫 번째 단계: CloudWatch 메트릭 분석**
+
+AWS 콘솔에서 다음과 같이 확인했습니다:
+
+```
+AWS Console → ElastiCache → Redis Clusters
+→ traffic-tacos-redis 클릭
+→ CloudWatch Metrics 탭
+```
+
+확인한 주요 메트릭:
+- `EngineCPUUtilization`: **지속적으로 100%** 🔴
+  - 정상: 60% 이하
+  - 현재: 100% 유지 (위험!)
+
+- `CommandsProcessed`: **초당 10만+ 건**
+  - 정상: 3-5만 건
+  - 현재: 10만 건 이상 (비정상적으로 많음)
+
+- `NetworkBytesIn`: **비정상적으로 높음**
+  - 정상: 수 MB/s
+  - 현재: 수십 MB/s (데이터 전송 과다)
+
+이 메트릭들이 말해주는 것:
+"Redis가 너무 많은 명령어를 처리하고 있다"
+"특정 명령어가 과도하게 실행되고 있다"
+
+**두 번째 단계: pprof 프로파일링**
+
+CloudWatch는 "무엇이 문제인지"는 알려주지 않습니다.
+"어디서 문제가 발생하는지" 찾아야 했습니다.
+
+Go 애플리케이션에는 `pprof`라는 강력한 프로파일링 도구가 내장되어 있습니다.
+
+```go
+// cmd/gateway/main.go
+import "github.com/gofiber/fiber/v2/middleware/pprof"
+
+app.Use(pprof.New())
+```
+
+이렇게 설정하면, `/debug/pprof/` 엔드포인트로 접근할 수 있습니다.
+
+**프로파일링 실행:**
+```bash
+# CPU 프로파일 30초간 수집
+curl http://gateway-api:8000/debug/pprof/profile?seconds=30 > cpu.prof
+
+# 프로파일 분석 (top 함수들)
+go tool pprof -top cpu.prof
+
+# 웹 UI로 보기
+go tool pprof -http=:8080 cpu.prof
+```
+
+**분석 결과:**
+```
+Showing nodes accounting for 3.5s, 85% of 4.1s total
+      flat  flat%   sum%        cum   cum%
+     2.1s 51.22% 51.22%      2.5s 60.98%  calculateGlobalPosition
+     0.8s 19.51% 70.73%      0.9s 21.95%  redis.Keys
+     0.3s  7.32% 78.05%      0.4s  9.76%  redis.XLen
+     ...
+```
+
+범인을 찾았습니다!
+```go
+// internal/queue/streams.go
+func (sq *StreamQueue) calculateGlobalPosition(...) int {
+    pattern := fmt.Sprintf("stream:event:{%s}:user:*", eventID)
+    keys, err := sq.redis.Keys(ctx, pattern).Result() // 🔴 범인!
+    // ...
+}
+```
+
+**`calculateGlobalPosition()` 함수가 CPU의 51%를 차지**하고 있었습니다.
+그리고 그 안에서 `redis.Keys()` 호출이 대부분의 시간을 소비했습니다.
+
+이 함수는 **Status API**에서 호출됩니다.
+
+**Status API**는 사용자가 자신의 순번을 조회하는 API입니다.
+- 사용자는 5초마다 폴링합니다
+- 1만 명이 대기 중이면? → 초당 2,000건의 Status API 호출
+- 10만 명이 대기 중이면? → 초당 20,000건!
+
+그리고 이 함수가 **`KEYS` 명령어**를 사용하고 있었습니다.
+
+**`KEYS` 명령어의 문제점:**
+- **O(N) 시간 복잡도**: 모든 키를 스캔합니다
+- **Blocking operation**: 실행 중 다른 명령어를 막습니다
+- **Cluster Mode**: 모든 샤드를 스캔합니다
+- **프로덕션 금지**: Redis 공식 문서에서도 사용 금지
+
+10,000 RPS Status API면,
+**초당 10,000번의 KEYS 명령어**가 실행되는 겁니다.
+
+Redis가 버틸 수 없었죠.
+
+**왜 이런 코드를 짰을까요?**
+초기에는 "빨리 만들자"에 집중했고,
+성능 최적화는 나중에 하려고 했습니다.
+하지만 10k RPS에서 이미 한계에 도달했습니다.
+
+---
+
+## 📜 1.11 해결 방법 - Position Index
+
+### 슬라이드
+```
+"KEYS 제거, Index 도입"
+
+Before (KEYS scan):
+┌─────────────────────────────────┐
+│ Status API 호출                 │
+│   ↓                             │
+│ calculateGlobalPosition()       │
+│   ↓                             │
+│ KEYS stream:event:{evt}:user:*  │
+│   ↓ O(N) = 10,000+ keys         │
+│   ↓ ~100ms (blocking)           │
+│   ↓ CPU 100% 💥                 │
+└─────────────────────────────────┘
+
+After (Position Index):
+┌─────────────────────────────────┐
+│ Status API 호출                 │
+│   ↓                             │
+│ CalculateApproximatePosition()  │
+│   ↓                             │
+│ ZRANK queue:event:{evt}:position│
+│   ↓ O(log N) = ~14 comparisons  │
+│   ↓ <1ms (non-blocking)         │
+│   ↓ CPU 40% ✅                  │
+└─────────────────────────────────┘
+
+성능 개선: ~100배!
+```
+
+### 멘트
+
+해결 방법은 명확했습니다.
+**KEYS를 없애고, 인덱스를 만들자.**
+
+**Position Index**라는 개념을 도입했습니다.
+ZSET 기반의 인덱스입니다.
+
+**작동 방식:**
+
+1. **Join 시 (대기열 참여):**
+   ```go
+   // Position Index에 추가
+   indexKey := "queue:event:{evt}:position"
+   score := time.Now().UnixNano() // timestamp
+   redis.ZAdd(ctx, indexKey, redis.Z{Score: score, Member: token})
+   ```
+
+2. **Status 시 (순번 조회):**
+   ```go
+   // Position Index에서 rank 조회
+   rank, err := redis.ZRank(ctx, indexKey, token).Result()
+   position := int(rank) + 1 // 0-based → 1-based
+   ```
+
+**시간 복잡도 비교:**
+- `KEYS`: O(N) - 10,000 keys면 ~100ms
+- `ZRANK`: O(log N) - 10,000 keys면 ~14 comparisons, <1ms
+
+**100배 빠릅니다!**
+
+그리고 무엇보다,
+`ZRANK`는 **non-blocking**입니다.
+다른 명령어를 방해하지 않습니다.
+
+**구현 후 테스트:**
+- Redis CPU: 100% → 40%
+- Status API 응답 시간: 100ms → <5ms
+- 처리량: 10k RPS → 여유로움
+
+**드디어 병목을 해결했습니다!**
+
+---
+
+## 📜 1.12 추가 최적화들
+
+### 슬라이드
+```
+"세부 튜닝"
+
+3가지 추가 최적화:
+
+1️⃣ Redis Connection Pool
+   PoolSize: 100 → 1000
+   PoolTimeout: 4s → 10s
+   → 고부하에서 connection pool timeout 제거
+
+2️⃣ Go 메모리 최적화
+   GOMEMLIMIT=450MiB
+   GOGC=75
+   → GC 적극 실행, HPA scale-down 정상화
+
+3️⃣ Readiness Probe 조정
+   initialDelaySeconds: 5 → 15초
+   → Redis Cluster 연결 대기
+   → Pod 시작 안정화
+```
+
+### 멘트
+
+Position Index로 큰 병목을 해결했지만,
+세부 튜닝이 더 필요했습니다.
+
+**첫째, Redis Connection Pool**
+
+고부하에서 `redis: connection pool timeout` 에러가 발생했습니다.
+- 기본 Pool Size가 100으로 부족
+- Timeout이 4초로 짧음
+
+**해결:**
+- `PoolSize: 1000` (10배 증가)
+- `PoolTimeout: 10s` (2.5배 증가)
+- `MinIdleConns: 100` (warm pool)
+
+**둘째, Go 메모리 최적화**
+
+테스트 후에도 메모리가 해제되지 않아,
+HPA가 scale-down을 못 하는 문제가 있었습니다.
+
+**해결:**
+- `GOMEMLIMIT=450MiB`: Go GC가 메모리 한계 인식
+- `GOGC=75`: 더 자주 GC 실행 (기본값 100)
+- `GODEBUG=madvdontneed=1`: 메모리 즉시 반환
+
+결과: 테스트 후 메모리 200Mi → 80Mi
+
+**셋째, Readiness Probe**
+
+Pod 시작 시 Redis Cluster 연결에 10초 정도 걸리는데,
+Readiness Probe가 5초만 기다리고 NotReady 판정.
+
+**해결:**
+- `initialDelaySeconds: 15초` (충분한 대기)
+- `periodSeconds: 5초` (체크 간격 완화)
+- `failureThreshold: 3` (실패 허용 증가)
+
+결과: Rolling update가 부드럽게 진행
+
+---
+
+## 📜 1.13 최종 결과
+
+### 슬라이드
+```
+"30,000 RPS 달성!"
+
+┌────────────────────────────────────────┐
+│ RPS     │ Redis CPU │ Result          │
+├────────────────────────────────────────┤
+│ Before  (KEYS 사용)                    │
+│ 10k     │ 100%      │ ❌ 한계 도달     │
+│ 15k+    │ N/A       │ ❌ 불가능        │
+├────────────────────────────────────────┤
+│ After   (Position Index)               │
+│ 10k     │ 40%       │ ✅ 여유          │
+│ 20k     │ 70%       │ ✅ 안정          │
+│ 30k     │ 90%       │ ✅ 목표 달성!    │
+└────────────────────────────────────────┘
+
+추가 비용: 0원 (코드 최적화만)
+노드 증설: 불필요
+ElastiCache: cache.m7g.xlarge × 10 nodes 유지
+```
+
+### 멘트
+
+최종 부하 테스트 결과입니다.
+
+**최적화 전 (KEYS 사용):**
+- 10k RPS: Redis CPU 100% - 한계 도달
+- 15k RPS 이상: 불가능
+
+**최적화 후 (Position Index):**
+- **10k RPS**: Redis CPU 40% - 여유롭습니다
+- **20k RPS**: Redis CPU 70% - 안정적입니다
+- **30k RPS**: Redis CPU 90% - **목표 달성!** 🎉
+
+그리고 무엇보다,
+**추가 비용이 들지 않았습니다.**
+
+- Redis 노드 증설? → 불필요
+- EKS 노드 증설? → 불필요
+- 코드 최적화만으로 달성
+
+**cache.m7g.xlarge × 10 nodes** 그대로
+30k RPS를 처리할 수 있게 되었습니다.
+
+---
+
+## 📜 1.14 설계 검증
+
+### 슬라이드
+```
+"아키텍처 설계가 맞았다"
+
+우리의 가설:
+"Gateway + Redis가 방파제 역할을 할 것이다"
+
+검증 결과:
+✅ Gateway + Redis가 30만 명 트래픽 받아냄
+✅ 입장 제어로 뒷단 보호 (1,000 RPS로 제한)
+✅ Backend CPU < 5% (매우 여유로움)
+✅ DynamoDB 10% 사용 (쓰기 비용 절감)
+✅ 비용 증가 없이 30k RPS 달성
+
+
+Trade-off 수용:
+"Gateway 부하 집중" → 최적화로 해결
+"Redis 병목" → Position Index로 해결
+
+
+설계 철학 검증:
+✅ 실시간 피드백 (순번 조회)
+✅ 뒷단 보호 (입장 제어)
+✅ 공정성 보장 (대기열 관리)
+✅ 비용 효율성 (코드 최적화)
+```
+
+### 멘트
+
+가장 중요한 교훈은,
+**우리의 아키텍처 설계가 맞았다**는 겁니다.
+
+**처음 설계 단계에서 세운 가설:**
+"Gateway + Redis가 방파제 역할을 할 것이다"
+
+**검증 결과:**
+- Gateway + Redis가 30만 명의 트래픽을 받아냈습니다
+- 입장 제어로 뒷단을 보호했습니다 (1,000 RPS로 제한)
+- Backend 서비스들은 CPU 5% 미만으로 여유로웠습니다
+- DynamoDB는 10%만 사용했습니다 (쓰기 비용 절감)
+- 비용 증가 없이 30k RPS를 달성했습니다
+
+**Trade-off 수용:**
+우리는 "Gateway에 부하가 집중될 것"을 알고 있었습니다.
+하지만 이 Trade-off를 수용하고, 최적화에 집중했습니다.
+- Position Index 도입
+- Connection Pool 튜닝
+- Go 메모리 최적화
+
+**설계 철학 검증:**
+1. **실시간 피드백**: 사용자는 5초마다 순번 확인 ✅
+2. **뒷단 보호**: Backend CPU < 5% ✅
+3. **공정성 보장**: 대기열 순서 관리 ✅
+4. **비용 효율성**: 추가 비용 0원 ✅
+
+만약 다른 아키텍처를 선택했다면?
+- Direct Access: DB가 터졌을 겁니다
+- Queue Service: 사용자 경험이 나빴을 겁니다
+
+**Gateway + 입장 제어가 정답이었습니다.**
+
+---
+
+# 🔒 Part 2: 보안 (Security) - 5분
+
+## 📜 2.1 인증 & 인가
+
+### 슬라이드
+```
+"JWT 기반 인증 체계"
+
+JWT 인증:
+├─ OIDC 기반 토큰 검증
+├─ JWK 캐시 (Redis, 10분 TTL)
+├─ 클레임 검증: aud, iss, exp
+└─ 자체 발급 토큰 (대기열용)
+
+Authorization (입장 토큰):
+├─ Join → Gateway가 waiting_token 발급
+├─ Enter → reservation_token 발급 (30초 TTL)
+├─ 예약 시 reservation_token 필수 검증
+└─ Reservation API에서 재검증
+
+Security Headers:
+├─ CSP (Content Security Policy)
+├─ HSTS (Strict-Transport-Security)
+└─ X-Frame-Options
+```
+
+### 멘트
+
+티켓팅 시스템에서 보안은 필수입니다.
+특히 봇 공격과 부정 거래를 막아야 합니다.
+
+**JWT 인증:**
+- OIDC 프로바이더 (AWS Cognito) 연동
+- JWK (JSON Web Key) 캐시로 검증 속도 향상
+- Redis에 10분 TTL로 캐싱
+
+**입장 토큰 시스템:**
+1. **대기열 참여**: `waiting_token` 발급
+2. **입장 허용**: `reservation_token` 발급 (30초 TTL)
+3. **예약 시**: `reservation_token` 필수
+
+이 2단계 토큰 시스템으로 부정 접근을 차단합니다.
+
+---
+
+## 📜 2.2 Rate Limiting & Idempotency
+
+### 슬라이드
+```
+"트래픽 제어"
+
+Rate Limiting:
+├─ Token Bucket 알고리즘
+├─ IP/사용자별 50 RPS
+├─ Redis Lua Script 기반 (원자성)
+└─ 429 응답 + Retry-After 헤더
+
+Idempotency (멱등성):
+├─ POST/PUT/DELETE 필수
+├─ Idempotency-Key: UUID-v4
+├─ Redis 저장 (TTL: 5분)
+├─ 중복 요청 → 409 Conflict
+└─ 동일 키 + 동일 바디 → 200 (캐시된 응답)
+```
+
+### 멘트
+
+**Rate Limiting:**
+Token Bucket 알고리즘으로 사용자당 초당 50 RPS로 제한합니다.
+- Redis Lua Script로 원자성 보장
+- 초과 시 429 응답
+- `Retry-After` 헤더로 재시도 시점 안내
+
+**Idempotency (멱등성):**
+네트워크 재시도로 인한 중복 요청을 방지합니다.
+- `Idempotency-Key` 헤더 필수 (UUID-v4)
+- Redis에 5분간 저장
+- 동일 키로 다시 요청 시:
+  - 같은 바디: 200 (캐시된 응답)
+  - 다른 바디: 409 Conflict (에러)
+
+---
+
+## 📜 2.3 다층 봇 방어
+
+### 슬라이드
+```
+"4단계 봇 방어 전략"
+
+Layer 1: CloudFront + AWS Shield
+├─ DDoS 방어 (최대 수십만 RPS)
+├─ AWS WAF 규칙
+└─ Bot Control
+
+Layer 2: Gateway Rate Limiting
+├─ IP 기반 제한 (50 RPS)
+├─ User Agent 검증
+└─ 의심 트래픽 차단
+
+Layer 3: Queue Heartbeat
+├─ 대기열 참여 후 5초마다 Heartbeat
+├─ 60초 무응답 시 자동 제거
+└─ 봇의 대량 대기열 점유 방지
+
+Layer 4: Reservation Idempotency
+├─ 멱등성 키 필수
+├─ 짧은 시간 내 대량 예약 차단
+└─ 패턴 분석 (ML 기반 향후 도입)
+```
+
+### 멘트
+
+티켓팅의 가장 큰 적은 봇입니다.
+우리는 4단계 방어 전략을 구축했습니다.
+
+**Layer 1: CloudFront**
+- AWS Shield로 DDoS 방어
+- AWS WAF로 악성 트래픽 차단
+
+**Layer 2: Gateway**
+- Rate Limiting으로 폭주 방지
+- IP/User Agent 검증
+
+**Layer 3: Queue**
+- Heartbeat 메커니즘
+- 비활성 사용자 자동 제거
+- 봇의 대량 대기열 점유 방지
+
+**Layer 4: Reservation**
+- Idempotency로 중복 차단
+- 패턴 분석 (향후 ML 도입 예정)
+
+---
+
+# 💰 Part 3: FinOps (Cost Optimization) - 5분
+
+## 📜 3.1 설계 단계 비용 고려
+
+### 슬라이드
+```
+"설계부터 비용을 고려하다"
+
+인프라 선택:
+1️⃣ Redis: Graviton (ARM64)
+   - x86 대비 20% 비용 절감
+   - cache.m7g.xlarge 선택
+
+2️⃣ Gateway: Spot Instance
+   - On-demand 대비 70% 절감
+   - Karpenter로 자동 관리
+   - 중단율 < 2%
+
+3️⃣ EKS: Karpenter Auto-scaling
+   - 필요한 만큼만 노드 생성
+   - 유휴 노드 자동 제거
+   - Spot + On-demand 믹스
+
+4️⃣ DynamoDB: On-demand
+   - 피크 대응 (예측 불가능한 트래픽)
+   - 입장 제어로 쓰기 제한 (1,000 RPS)
+   - 평상시 비용 0원
+```
+
+### 멘트
+
+우리는 설계 단계부터 비용을 고려했습니다.
+
+**Redis: Graviton (ARM64)**
+- Intel/AMD 대비 20% 저렴
+- 성능은 동일
+- cache.m7g.xlarge 선택
+
+**Gateway: Spot Instance**
+- On-demand 대비 70% 절감
+- Karpenter가 자동으로 Spot 관리
+- 중단율 < 2% (다양한 인스턴스 타입 사용)
+
+**DynamoDB: 입장 제어로 비용 최소화**
+- 쓰기를 1,000 RPS로 제한
+- 30분 티켓팅: $2.25
+- 예측 가능한 비용
+
+---
+
+## 📜 3.2 비용 절감 결과
+
+### 슬라이드
+```
+"월 $1,700 절감 달성"
+
+절감 항목:
+1️⃣ Redis 최적화 (코드 개선)
+   Before: 노드 증설 필요 ($500/month)
+   After: 코드 최적화로 해결
+   절감: $500/month
+
+2️⃣ Karpenter Spot Instance
+   Before: On-demand 노드 10개 ($1,200/month)
+   After: Spot 노드 7개 + On-demand 3개 ($360/month)
+   절감: $840/month
+
+3️⃣ DynamoDB 입장 제어
+   Before: 무제한 쓰기 (예상: $10-50/event)
+   After: 1,000 RPS 제한 ($2.25/event)
+   절감: $8-48/event
+
+4️⃣ Go 메모리 최적화
+   Before: HPA scale-down 안됨 (유휴 노드 유지)
+   After: GOMEMLIMIT으로 메모리 회수 정상화
+   절감: $360/month (유휴 노드 3개 제거)
+
+총 절감: $1,700/month + @
+추가 비용: $0 (30k RPS 달성)
+```
+
+### 멘트
+
+비용 절감 결과입니다.
+
+**1. Redis 최적화: $500/month 절감**
+- KEYS → Position Index
+- 노드 증설 불필요
+- 코드 개선만으로 해결
+
+**2. Karpenter Spot: $840/month 절감**
+- On-demand 10개 → Spot 7개 + On-demand 3개
+- 70% 비용 절감
+- 안정성 유지 (중단율 < 2%)
+
+**3. 입장 제어: 이벤트당 $8-48 절감**
+- DynamoDB 쓰기 제한
+- 예측 가능한 비용
+- 30분 티켓팅: $2.25
+
+**4. Go 메모리 최적화: $360/month 절감**
+- GOMEMLIMIT, GOGC 설정
+- HPA scale-down 정상화
+- 유휴 노드 제거
+
+**총 절감: 월 $1,700 + 이벤트당 $8-48**
+**추가 비용: $0** (코드 최적화로 30k RPS 달성)
+
+---
+
+# 📊 Part 4: 관측성 (Observability) - 5분
+
+## 📜 4.1 메트릭 수집 & 병목 발견
+
+### 슬라이드
+```
+"CloudWatch + pprof로 병목 찾기"
+
+Step 1: CloudWatch 메트릭
+AWS Console → ElastiCache → Redis Clusters
+→ traffic-tacos-redis → CloudWatch Metrics
+
+확인한 메트릭:
+├─ EngineCPUUtilization: 100% 🔴
+├─ CommandsProcessed: 10만+ 건 (비정상)
+└─ NetworkBytesIn: 수십 MB/s (과도)
+
+문제 인식: "특정 명령어가 과도하게 실행되고 있다"
+
+Step 2: pprof 프로파일링
+Setup: app.Use(pprof.New())
+실행: curl /debug/pprof/profile?seconds=30
+분석: go tool pprof -top cpu.prof
+
+결과:
+      flat  flat%   sum%
+     2.1s 51.22%     calculateGlobalPosition
+     0.8s 19.51%     redis.Keys
+
+범인: Status API의 KEYS 명령어!
+```
+
+### 멘트
+
+병목을 찾는 과정을 설명하겠습니다.
+
+**Step 1: CloudWatch 메트릭 분석**
+
+AWS 콘솔에서 ElastiCache 메트릭을 확인했습니다.
+- `EngineCPUUtilization`: 지속적 100% 🔴
+- `CommandsProcessed`: 초당 10만+ 건 (정상: 3-5만)
+- `NetworkBytesIn`: 수십 MB/s (비정상적)
+
+이것만으로는 "무엇이 문제인지"만 알 수 있습니다.
+"어디서 문제가 발생하는지"는 모릅니다.
+
+**Step 2: pprof 프로파일링**
+
+Go 애플리케이션에 pprof를 켰습니다.
+```go
+app.Use(pprof.New())
+```
+
+CPU 프로파일을 수집하고 분석했습니다.
+```bash
+curl http://gateway-api:8000/debug/pprof/profile?seconds=30 > cpu.prof
+go tool pprof -top cpu.prof
+```
+
+**범인 발견:**
+- `calculateGlobalPosition()`: CPU의 51% 차지
+- 그 안의 `redis.Keys()`: 대부분의 시간 소비
+- Status API가 초당 10,000번 호출
+
+**이것이 병목이었습니다!**
+
+---
+
+## 📜 4.2 분산 추적 & 로깅
+
+### 슬라이드
+```
+"OpenTelemetry 기반 관측성"
+
+분산 추적 (Tracing):
+├─ OpenTelemetry 계측
+├─ Trace ID 전파 (모든 서비스)
+├─ Span: Gateway → Reservation → Inventory
+└─ Jaeger 시각화
+
+구조화 로깅:
+├─ JSON 포맷
+├─ Trace ID 포함
+├─ 레벨별 분리 (INFO, WARN, ERROR)
+└─ CloudWatch Logs Insights
+
+Prometheus 메트릭:
+├─ http_server_requests_total
+├─ http_server_requests_duration_seconds
+├─ backend_call_duration_seconds
+└─ Custom: queue_length, admission_rate
+```
+
+### 멘트
+
+**분산 추적:**
+- OpenTelemetry로 모든 서비스 계측
+- Trace ID로 전체 요청 흐름 추적
+- Jaeger로 시각화
+
+**구조화 로깅:**
+- JSON 포맷으로 일관성
+- Trace ID 포함으로 추적 가능
+- CloudWatch Logs Insights로 분석
+
+**Prometheus 메트릭:**
+- 표준 HTTP 메트릭
+- 커스텀 비즈니스 메트릭 (대기열 길이, 입장률)
+- Grafana 대시보드
+
+---
+
+# 🧪 Part 5: 부하테스트 (Load Testing) - 5분
+
+## 📜 5.1 테스트 시나리오 & 결과
+
+### 슬라이드
+```
+"점진적 부하 증가 전략"
+
+테스트 단계:
+1️⃣ 1k RPS: 기능 검증
+   ├─ 모든 컴포넌트 OK ✅
+   └─ 아키텍처 작동 확인
+
+2️⃣ 5k RPS: 초기 확장
+   ├─ Gateway 3 pods → 5 pods
+   └─ 안정적 처리 ✅
+
+3️⃣ 10k RPS: 병목 발견
+   ├─ Redis CPU 100% 🔴
+   ├─ Status API KEYS 명령어
+   └─ 최적화 필요!
+
+4️⃣ 최적화 후 10k RPS:
+   ├─ Position Index 적용
+   ├─ Redis CPU 40% ✅
+   └─ 여유로움
+
+5️⃣ 20k RPS: 확장 검증
+   ├─ Gateway 10 pods → 20 pods
+   ├─ Redis CPU 70% ✅
+   └─ 안정적
+
+6️⃣ 30k RPS: 목표 달성
+   ├─ Gateway 30 pods
+   ├─ Redis CPU 90% ✅
+   └─ 목표 달성! 🎉
+```
+
+### 멘트
+
+부하 테스트 전략은 점진적 증가였습니다.
+
+**1k RPS:** 기능 검증
+- 모든 API 정상 작동
+- 아키텍처 검증 완료
+
+**5k RPS:** 초기 확장
+- Karpenter가 자동으로 Gateway pods 증가
+- 안정적 처리
+
+**10k RPS:** 병목 발견!
+- Redis CPU 100%
+- KEYS 명령어가 문제
+- Position Index로 최적화
+
+**최적화 후:**
+- 10k RPS: Redis CPU 40%
+- 20k RPS: Redis CPU 70%
+- **30k RPS: Redis CPU 90% - 목표 달성!**
+
+**최종 성능:**
+- 처리량: 30k RPS
+- Gateway CPU: 15%
+- Backend CPU: < 5%
+- 에러율: < 1%
+
+---
+
+## 📜 5.2 Karpenter 자동 확장 검증
+
+### 슬라이드
+```
+"Karpenter 확장 성능"
+
+Scale-up 테스트:
+├─ 1k → 5k RPS (4k 증가):
+│   └─ 30초만에 2 pods 추가 (3 → 5)
+│
+├─ 5k → 10k RPS (5k 증가):
+│   └─ 1분만에 5 pods 추가 (5 → 10)
+│
+├─ 10k → 20k RPS (10k 증가):
+│   └─ 2분만에 10 pods 추가 (10 → 20)
+│
+└─ 20k → 30k RPS (10k 증가):
+    └─ 2분만에 10 pods 추가 (20 → 30)
+
+Scale-down 테스트:
+├─ 30k → 10k RPS:
+│   └─ 5분만에 15 pods 제거 (30 → 15)
+│
+└─ 10k → 1k RPS:
+    └─ 10분만에 10 pods 제거 (15 → 5)
+
+Spot Instance 효과:
+├─ Spot 비율: 70% (21/30 pods)
+├─ 중단율: < 2% (1개월 평균)
+└─ 비용 절감: $840/month
+```
+
+### 멘트
+
+Karpenter의 자동 확장 성능입니다.
+
+**Scale-up (빠름):**
+- 5k RPS 증가 시: 30초 ~ 1분
+- 10k RPS 증가 시: 2분
+- 트래픽 증가에 빠르게 대응
+
+**Scale-down (안정적):**
+- 5-10분 대기 후 제거
+- 트래픽 감소 확인 후 축소
+- 안정성 우선
+
+**Spot Instance:**
+- 70% Spot + 30% On-demand
+- 중단율 < 2% (다양한 타입 사용)
+- 월 $840 절감
+
+**핵심:**
+- Gateway 부하 집중 → Karpenter로 대응 성공
+- Trade-off를 자동화로 해결
+
+---
+
+# 🎓 Part 6: Lesson Learned - 5분
+
+## 📜 6.1 설계 과정의 교훈
+
+### 슬라이드
+```
+"설계부터 최적화까지의 교훈"
+
+1️⃣ 요구사항 먼저
+   "30만 명, 실시간 피드백, 공정성"
+   → 아키텍처가 따라옴
+
+2️⃣ Trade-off 인정
+   "Gateway 부하 집중" → 수용하고 최적화
+
+3️⃣ 적절한 도구 선택
+   "대기열 = Redis ZSET" → 딱 맞음
+
+4️⃣ 초기 구현 ≠ 최종
+   "일단 작동하게, 그 다음 최적화"
+
+5️⃣ 모니터링 필수
+   "CloudWatch + pprof" → 병목 발견
+
+6️⃣ 코드가 답
+   "노드 증설 < 코드 최적화"
+
+7️⃣ 검증 중요
+   "설계가 맞았는지 테스트로 증명"
+```
+
+### 멘트
+
+이번 여정에서 배운 교훈들을 정리하겠습니다.
+
+**첫째, 요구사항이 먼저입니다.**
+"30만 명을 처리해야 한다" → 기술 선택
+"실시간 피드백이 필요하다" → Gateway 패턴
+"공정성을 보장해야 한다" → 대기열 관리
+
+기술이 먼저가 아니라, 요구사항이 먼저입니다.
+
+**둘째, Trade-off를 인정해야 합니다.**
+"Gateway에 부하가 집중될 것이다" → 알고 있었습니다.
+하지만 이게 최선이라고 판단했습니다.
+그리고 최적화에 집중했습니다.
+
+**셋째, 적절한 도구를 선택해야 합니다.**
+대기열 관리 = Redis ZSET
+이만큼 딱 맞는 도구가 없었습니다.
+
+**넷째, 초기 구현과 최종은 다릅니다.**
+"일단 작동하게 만들자" → KEYS 사용
+"이제 최적화하자" → Position Index
+
+빠르게 검증하고, 점진적으로 개선하는 게 중요합니다.
+
+**다섯째, 모니터링이 필수입니다.**
+CloudWatch 없었으면, Redis CPU 100%를 몰랐을 겁니다.
+pprof 없었으면, KEYS가 문제인지 몰랐을 겁니다.
+
+**여섯째, 코드가 답입니다.**
+"Redis 노드를 늘릴까?" → 비용 증가
+"코드를 최적화하자" → 비용 0원
+
+대부분의 문제는 코드 최적화로 해결할 수 있습니다.
+
+**일곱째, 검증이 중요합니다.**
+"이 설계가 맞을까?" → 부하 테스트로 증명
+"정말 30k RPS를 처리할까?" → 실제로 처리함
+
+설계가 맞았는지는, 테스트로 증명해야 합니다.
+
+---
+
+## 📜 6.2 실전 팁
+
+### 슬라이드
+```
+"Redis 사용 시 주의사항"
+
+🚫 절대 하지 말아야 할 것들:
+1. KEYS 명령어 사용 (O(N) blocking)
+   → SCAN 또는 Index 사용
+   
+2. 작은 Connection Pool (고부하 대비 안됨)
+   → 최소 1000 이상 권장
+   
+3. 기본 Timeout 설정 (Redis 응답 대기 필요)
+   → 10s 이상 여유있게
+   
+4. Cluster Mode 무시 (Hash tag 필수)
+   → {key} 형식으로 같은 slot에 매핑
+
+
+✅ 반드시 해야 할 것들:
+1. 적절한 자료구조 (ZSET for Index)
+2. Lua Script (원자적 연산)
+3. TTL 설정 (자동 만료)
+4. Read Replica 활용 (읽기 분산)
+5. CloudWatch 모니터링 (CPU, Network)
+6. pprof 프로파일링 (병목 찾기)
+```
+
+### 멘트
+
+마지막으로, 실전 팁들을 공유하겠습니다.
+
+**Redis 사용 시 절대 하지 말아야 할 것:**
+
+1. **KEYS 명령어 사용**
+   - Production에서 절대 금지
+   - 대신 SCAN이나 Index 사용
+   - 우리의 교훈: KEYS → 100배 느림
+
+2. **작은 Connection Pool**
+   - 기본값 100은 부족
+   - 최소 1000 이상 권장
+   - 고부하 대비 필수
+
+3. **짧은 Timeout**
+   - 2-3초는 부족
+   - 10초 이상 여유있게
+   - Redis 응답 대기 필요
+
+4. **Cluster Mode 무시**
+   - Hash tag 사용 필수
+   - `{eventID}` 형식으로 같은 slot 매핑
+   - CROSSSLOT 에러 방지
+
+**반드시 해야 할 것:**
+
+1. **적절한 자료구조**
+   - ZSET으로 Index 만들기
+   - O(log N) 조회 보장
+
+2. **Lua Script**
+   - 원자적 연산 보장
+   - Race condition 방지
+
+3. **TTL 설정**
+   - 비활성 데이터 자동 만료
+   - 메모리 관리
+
+4. **Read Replica**
+   - 읽기 부하 분산
+   - `RouteByLatency: true`
+
+5. **모니터링**
+   - CloudWatch 메트릭 확인
+   - CPU/Network/Commands 추적
+
+6. **프로파일링**
+   - pprof로 병목 찾기
+   - CPU/Memory/Goroutine 분석
+
+---
+
+## 📜 6.3 마무리
+
+### 슬라이드
+```
+"30만 명의 트래픽, 어떻게 처리했나?"
+
+여정 요약:
+1️⃣ 문제 정의: 30만 명, 실시간, 공정성
+2️⃣ 설계 고민: Direct vs Queue vs Gateway
+3️⃣ 우리의 선택: Gateway + Redis + 입장 제어
+4️⃣ 왜 Redis인가: ZSET, Lua, TTL, Cluster
+5️⃣ 설계 구조: 방파제 아키텍처
+5️⃣-1️⃣ 용량 산정: 왜 1,000 RPS인가?
+6️⃣ 인스턴스 선정: cache.m7g.xlarge × 10
+7️⃣ 구현 및 검증: 1k RPS → 작동 확인
+8️⃣ 병목 발견: 10k RPS → Redis CPU 100%
+9️⃣ 근본 원인: CloudWatch + pprof → KEYS 명령어
+🔟 해결: Position Index (O(log N))
+1️⃣1️⃣ 세부 튜닝: Pool, Memory, Probe
+1️⃣2️⃣ 결과: 30k RPS, 비용 0원
+1️⃣3️⃣ 설계 검증: 가설 증명, Trade-off 해결
+
+
+핵심 교훈:
+"요구사항 → 설계 → 구현 → 검증 → 최적화"
+"Trade-off를 인정하고, 집중 투자"
+"병목은 예상 밖의 곳에서, 해결책은 가까운 곳에"
+
+
+다음 목표: 100k RPS? Multi-region? 🚀
+```
+
+### 멘트
+
+정리하겠습니다.
+
+**"30만 명의 트래픽, 어떻게 처리할 것인가?"**
+
+이 질문에서 시작했습니다.
+
+**설계 단계:**
+- 3가지 아키텍처 패턴을 비교했습니다
+- Gateway + 입장 제어를 선택했습니다
+- Redis ZSET으로 대기열을 관리하기로 했습니다
+- Trade-off를 수용하고, 최적화에 집중하기로 했습니다
+
+**구현 및 검증:**
+- 1,000 RPS 테스트 → 작동 확인
+- 10,000 RPS 테스트 → 병목 발견 (Redis CPU 100%)
+- pprof 프로파일링 → 근본 원인 발견 (KEYS 명령어)
+
+**해결 및 최적화:**
+- Position Index 도입 (KEYS → ZRANK)
+- 성능 100배 향상 (O(N) → O(log N))
+- 세부 튜닝 (Pool, Memory, Probe)
+
+**최종 결과:**
+- 30,000 RPS 달성
+- 추가 비용 0원
+- 설계 검증 완료
+
+**핵심 교훈:**
+
+1. **요구사항이 먼저**
+   - 기술이 아닌, 요구사항이 설계를 이끕니다
+
+2. **Trade-off를 인정**
+   - 완벽한 설계는 없습니다
+   - Trade-off를 수용하고, 집중 투자합니다
+
+3. **점진적 검증**
+   - 빠르게 구현하고, 테스트로 검증합니다
+   - 병목을 찾고, 최적화합니다
+
+4. **코드가 답**
+   - 인프라 증설보다, 코드 최적화가 먼저입니다
+
+5. **모니터링과 프로파일링**
+   - 병목은 숨어 있습니다
+   - 도구로 찾아야 합니다
+
+**그리고 무엇보다:**
+병목은 예상 밖의 곳에서 발견되고,
+해결책은 의외로 가까운 곳에 있습니다.
+
+다음 목표는 100k RPS일까요?
+아니면 Multi-region 배포일까요?
+
+여러분의 시스템에도 숨겨진 병목이 있을 겁니다.
+찾아서 해결하는 그 과정이,
+바로 엔지니어링의 재미 아닐까요?
+
+감사합니다! 🚀
+
+---
+
+## 📊 부록: 기술 스택 & 성과
+
+### 기술 스택
+```yaml
+Architecture Pattern:
+  - Gateway + Admission Control
+  - Trade-off: Gateway 부하 집중 수용
+
+Gateway (방파제):
+  - Go + Fiber
+  - ElastiCache Redis Cluster (5 shards, 10 nodes)
+  - Position Index (ZSET) - O(log N)
+  - Admission Control (1,000 RPS)
+
+Backend (보호받는 영역):
+  - Reservation: Kotlin + Spring WebFlux
+  - Inventory: Go + gRPC
+  - Payment: Go + gRPC
+
+Database:
+  - DynamoDB (On-demand)
+  - ElastiCache Redis
+
+Monitoring & Profiling:
+  - CloudWatch (CPU, Network, Commands)
+  - Prometheus + Grafana
+  - pprof (Go CPU/Memory profiling)
+
+Infrastructure:
+  - EKS (Kubernetes)
+  - Karpenter (Auto-scaling)
+  - ArgoCD (GitOps)
+```
+
+### 설계 결정 (Design Decisions)
+```yaml
+Why Gateway + Admission Control?
+  ✅ 실시간 피드백 (순번 조회)
+  ✅ 뒷단 보호 (입장 제어)
+  ✅ 공정성 보장 (대기열 관리)
+  ❌ Gateway 부하 집중 (수용)
+
+Why Redis?
+  ✅ O(log N) 조회 (ZSET)
+  ✅ 원자적 연산 (Lua Script)
+  ✅ TTL 자동 만료
+  ✅ Cluster Mode (확장성)
+  ✅ Read Replica (읽기 분산)
+  ❌ DynamoDB: 비용 높음, 느림
+  ❌ PostgreSQL: 동시성 제어 어려움
+
+Why Position Index?
+  ✅ O(log N) vs O(N) (100배 빠름)
+  ✅ Non-blocking (ZRANK)
+  ✅ 간단한 구현
+  ❌ KEYS: 절대 금지
+```
+
+### 성과 지표
+```yaml
+Performance:
+  - 처리량: 10k → 30k RPS (3배 향상)
+  - Redis CPU: 100% → 40% (10k RPS 기준)
+  - Gateway CPU: 15% (여유)
+  - Backend CPU: 5% 미만 (매우 여유)
+  - Status API: 100ms → <5ms
+  
+Optimization:
+  - KEYS → Index: ~100x faster
+  - O(N) → O(log N): 시간 복잡도 개선
+  - Memory: 200Mi → 80Mi (idle)
+  - Readiness: Pod 시작 안정화
+  
+Cost:
+  - 추가 비용: 0원
+  - 노드 증설: 불필요
+  - 코드 최적화만으로 달성
+  - ElastiCache: cache.m7g.xlarge × 10 (유지)
+  
+Reliability:
+  - HPA scale-down: 정상화
+  - Rolling update: 안정화
+  - Error rate: < 1%
+  - Readiness probe failure: 제거
+```
+
+### 설계 검증 결과
+```yaml
+가설:
+  "Gateway + Redis가 방파제 역할을 할 것이다"
+
+검증:
+  ✅ 30만 명 트래픽 받아냄
+  ✅ 입장 제어로 뒷단 보호
+  ✅ Backend CPU < 5%
+  ✅ DynamoDB 10% 사용
+  ✅ 비용 0원 추가
+  ✅ 30k RPS 달성
+
+Trade-off 해결:
+  "Gateway 부하 집중" → Position Index 최적화
+  "Redis 병목" → O(log N) 개선
+
+설계 원칙 달성:
+  ✅ 실시간 피드백
+  ✅ 뒷단 보호
+  ✅ 공정성 보장
+  ✅ 비용 효율성
+```
+
+---
+
+**작성**: Traffic Tacos Team  
+**일자**: 2025-10-08  
+**버전**: 2.0 (설계 과정 중심 재구성)  
+**변경**: 결과 중심 → 설계 고민 및 Trade-off 분석 추가
