@@ -222,22 +222,24 @@ func (sq *StreamQueue) DequeueForUser(
 
 // CleanupExpiredStreams removes old stream entries
 // Should be called periodically (e.g., every 5 minutes)
+// ✅ Uses SCAN instead of KEYS for non-blocking operation
 func (sq *StreamQueue) CleanupExpiredStreams(
 	ctx context.Context,
 	eventID string,
 	maxAge time.Duration,
 ) (int, error) {
 	pattern := fmt.Sprintf("stream:event:{%s}:user:*", eventID)
-	keys, err := sq.redis.Keys(ctx, pattern).Result()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get keys: %w", err)
-	}
 
 	totalCleaned := 0
 	cutoffTime := time.Now().Add(-maxAge).Unix()
 	cutoffID := fmt.Sprintf("%d-0", cutoffTime*1000) // Convert to ms
 
-	for _, key := range keys {
+	// ✅ Use SCAN instead of KEYS (cursor-based, non-blocking)
+	iter := sq.redis.Scan(ctx, 0, pattern, 100).Iterator()
+
+	for iter.Next(ctx) {
+		key := iter.Val()
+
 		// Remove messages older than cutoff
 		deleted, err := sq.redis.XTrimMinID(ctx, key, cutoffID).Result()
 		if err != nil {
@@ -254,6 +256,11 @@ func (sq *StreamQueue) CleanupExpiredStreams(
 		}
 	}
 
+	if err := iter.Err(); err != nil {
+		sq.logger.WithError(err).WithField("pattern", pattern).Error("SCAN iteration error")
+		return totalCleaned, fmt.Errorf("failed to scan keys: %w", err)
+	}
+
 	sq.logger.WithFields(logrus.Fields{
 		"event_id": eventID,
 		"cleaned":  totalCleaned,
@@ -263,6 +270,7 @@ func (sq *StreamQueue) CleanupExpiredStreams(
 }
 
 // GetQueueStats returns statistics for the queue
+// ✅ Uses SCAN instead of KEYS for non-blocking operation
 type QueueStats struct {
 	TotalUsers    int
 	TotalMessages int
@@ -274,26 +282,35 @@ func (sq *StreamQueue) GetQueueStats(
 	eventID string,
 ) (*QueueStats, error) {
 	pattern := fmt.Sprintf("stream:event:{%s}:user:*", eventID)
-	keys, err := sq.redis.Keys(ctx, pattern).Result()
-	if err != nil {
-		return nil, err
-	}
 
+	totalUsers := 0
 	totalMessages := int64(0)
-	for _, key := range keys {
+
+	// ✅ Use SCAN instead of KEYS (cursor-based, non-blocking)
+	iter := sq.redis.Scan(ctx, 0, pattern, 100).Iterator()
+
+	for iter.Next(ctx) {
+		key := iter.Val()
+		totalUsers++
+
 		length, err := sq.redis.XLen(ctx, key).Result()
 		if err == nil {
 			totalMessages += length
 		}
 	}
 
+	if err := iter.Err(); err != nil {
+		sq.logger.WithError(err).WithField("pattern", pattern).Error("SCAN iteration error")
+		return nil, fmt.Errorf("failed to scan keys: %w", err)
+	}
+
 	stats := &QueueStats{
-		TotalUsers:    len(keys),
+		TotalUsers:    totalUsers,
 		TotalMessages: int(totalMessages),
 	}
 
-	if len(keys) > 0 {
-		stats.AvgPerUser = float64(totalMessages) / float64(len(keys))
+	if totalUsers > 0 {
+		stats.AvgPerUser = float64(totalMessages) / float64(totalUsers)
 	}
 
 	return stats, nil
