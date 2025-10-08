@@ -37,20 +37,20 @@ func (a *AdminHandler) FlushTestData(c *fiber.Ctx) error {
 	// Default patterns for test data (more specific for Cluster Mode)
 	patterns := []string{
 		// Queue patterns (specific for better Cluster Mode compatibility)
-		"queue:waiting:*",      // Queue waiting tokens
-		"queue:event:*",        // Queue event data
-		"queue:reservation:*",  // Queue reservation tokens
+		"queue:waiting:*",     // Queue waiting tokens
+		"queue:event:*",       // Queue event data
+		"queue:reservation:*", // Queue reservation tokens
 		// Stream patterns
-		"stream:event:*",       // Redis Streams for events
+		"stream:event:*", // Redis Streams for events
 		// Token and auth patterns
-		"allow:*",              // Admission allow tokens
+		"allow:*", // Admission allow tokens
 		// Idempotency and deduplication
-		"idempotency:*",        // Idempotency keys
-		"dedupe:*",             // Deduplication keys
+		"idempotency:*", // Idempotency keys
+		"dedupe:*",      // Deduplication keys
 		// User activity
-		"heartbeat:*",          // User heartbeat keys
+		"heartbeat:*", // User heartbeat keys
 		// Rate limiting (optional, may contain active limits)
-		"ratelimit:*",          // Rate limit counters
+		"ratelimit:*", // Rate limit counters
 	}
 
 	// Allow custom patterns from query param

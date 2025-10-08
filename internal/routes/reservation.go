@@ -38,10 +38,10 @@ func NewReservationHandler(client *clients.ReservationClient, logger *logrus.Log
 // @Router /reservations [post]
 // Request/Response models for API documentation
 type CreateReservationRequest struct {
-	EventID            string   `json:"event_id"`
-	SeatIDs            []string `json:"seat_ids"`
-	Quantity           int32    `json:"quantity"`
-	ReservationToken   string   `json:"reservation_token,omitempty"`
+	EventID          string   `json:"event_id"`
+	SeatIDs          []string `json:"seat_ids"`
+	Quantity         int32    `json:"quantity"`
+	ReservationToken string   `json:"reservation_token,omitempty"`
 }
 
 type ReservationResponse struct {
@@ -136,7 +136,7 @@ func (r *ReservationHandler) Get(c *fiber.Ctx) error {
 	// Convert gRPC response to API response (simplified until we confirm proto structure)
 	response := ReservationResponse{
 		ReservationID: reservationID,
-		Status:        "PENDING", // Default status
+		Status:        "PENDING",  // Default status
 		EventID:       "",         // Will need to get from proto response
 		SeatIDs:       []string{}, // Will need to get from proto response
 		Quantity:      0,          // Will need to get from proto response
@@ -250,7 +250,6 @@ func (r *ReservationHandler) Cancel(c *fiber.Ctx) error {
 	})
 }
 
-
 // handleClientError handles errors from backend client calls
 func (r *ReservationHandler) handleClientError(c *fiber.Ctx, err error, operation string) error {
 	// Map common client errors to appropriate HTTP status codes
@@ -353,4 +352,3 @@ func (r *ReservationHandler) internalError(c *fiber.Ctx, code, message string) e
 		},
 	})
 }
-

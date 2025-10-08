@@ -229,7 +229,6 @@ func (p *PaymentHandler) ProcessPayment(c *fiber.Ctx) error {
 	})
 }
 
-
 // handleClientError handles errors from backend client calls
 func (p *PaymentHandler) handleClientError(c *fiber.Ctx, err error, operation string) error {
 	// Map common client errors to appropriate HTTP status codes
@@ -312,4 +311,3 @@ func (p *PaymentHandler) internalError(c *fiber.Ctx, code, message string) error
 		},
 	})
 }
-
