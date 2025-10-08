@@ -94,46 +94,65 @@ func (sq *StreamQueue) Enqueue(
 }
 
 // calculateGlobalPosition estimates global position across all user streams
-// Note: This is an approximation due to distributed nature
+// 🔴 DEPRECATED: This method used KEYS() which is O(N) and blocks Redis
+// ✅ NEW: Use Position Index ZSET (O(log N)) or Legacy ZSET instead
+// Note: This is kept for backward compatibility but should not be called
 func (sq *StreamQueue) calculateGlobalPosition(
 	ctx context.Context,
 	eventID string,
 	userID string,
 	streamID string,
 ) int {
-	// Pattern to find all streams for this event
-	pattern := fmt.Sprintf("stream:event:{%s}:user:*", eventID)
+	// 🚨 CRITICAL: Do NOT use KEYS() in production!
+	// This caused Redis CPU 100% and 20s timeouts
 
-	// Get all stream keys for this event
-	keys, err := sq.redis.Keys(ctx, pattern).Result()
-	if err != nil {
-		sq.logger.WithError(err).Warn("Failed to get stream keys")
-		return 1 // Fallback
-	}
+	// Try Position Index ZSET first (fastest: O(log N))
+	positionKey := fmt.Sprintf("position_index:{%s}", eventID)
 
+	// Get user's waiting token from stream data
 	userStreamKey := fmt.Sprintf("stream:event:{%s}:user:%s", eventID, userID)
-	totalAhead := 0
-
-	// Count messages ahead of us
-	for _, key := range keys {
-		if key == userStreamKey {
-			// For our own stream, count messages before our ID
-			entries, err := sq.redis.XRange(ctx, key, "-", streamID).Result()
-			if err == nil && len(entries) > 0 {
-				// Subtract 1 because XRange includes the end ID
-				totalAhead += len(entries) - 1
+	entries, err := sq.redis.XRange(ctx, userStreamKey, streamID, streamID).Result()
+	if err == nil && len(entries) > 0 {
+		if token, ok := entries[0].Values["token"].(string); ok {
+			// Use ZRANK for O(log N) position lookup
+			rank, err := sq.redis.ZRank(ctx, positionKey, token).Result()
+			if err == nil {
+				position := int(rank) + 1
+				sq.logger.WithFields(logrus.Fields{
+					"token":    token,
+					"position": position,
+					"method":   "position_index_fallback",
+				}).Debug("Calculated position from Position Index (legacy stream call)")
+				return position
 			}
-			continue
-		}
-
-		// For other streams, count all messages
-		length, err := sq.redis.XLen(ctx, key).Result()
-		if err == nil {
-			totalAhead += int(length)
 		}
 	}
 
-	return totalAhead + 1
+	// Fallback: Use Legacy ZSET (still O(log N))
+	// This is safe because we know the token from Join API
+	eventQueueKey := fmt.Sprintf("queue:event:{%s}", eventID)
+
+	// Estimate position based on ZSET size (approximation)
+	totalCount, err := sq.redis.ZCard(ctx, eventQueueKey).Result()
+	if err == nil && totalCount > 0 {
+		// Return middle of queue as approximation
+		approxPosition := int(totalCount / 2)
+		if approxPosition < 1 {
+			approxPosition = 1
+		}
+
+		sq.logger.WithFields(logrus.Fields{
+			"total_count":     totalCount,
+			"approx_position": approxPosition,
+			"method":          "legacy_zset_approximation",
+		}).Debug("Calculated approximate position from Legacy ZSET size")
+
+		return approxPosition
+	}
+
+	// Final fallback: return 1
+	sq.logger.Warn("All position calculation methods failed, returning position 1")
+	return 1
 }
 
 // GetPosition returns current position for a specific stream message
