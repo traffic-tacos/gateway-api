@@ -165,7 +165,7 @@ func (q *QueueHandler) Join(c *fiber.Ctx) error {
 	pipe.Set(ctx, queueKey, queueDataBytes, 30*time.Minute)
 
 	// 2. Add to ZSET for position calculation (with TTL)
-	eventQueueKey := fmt.Sprintf("queue:event:%s", req.EventID)
+	eventQueueKey := fmt.Sprintf("queue:event:{%s}", req.EventID)
 	score := float64(time.Now().Unix()) // Use timestamp as score for FIFO ordering
 	pipe.ZAdd(ctx, eventQueueKey, redis.Z{
 		Score:  score,
@@ -256,7 +256,7 @@ func (q *QueueHandler) Status(c *fiber.Ctx) error {
 		queueData, _ := q.getQueueData(ctx, waitingToken)
 		if queueData != nil {
 			// Remove from ZSET
-			eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+			eventQueueKey := fmt.Sprintf("queue:event:{%s}", queueData.EventID)
 			q.redisClient.ZRem(ctx, eventQueueKey, waitingToken)
 
 			// Remove from Stream
@@ -375,7 +375,7 @@ func (q *QueueHandler) Enter(c *fiber.Ctx) error {
 	}
 
 	// 🔴 CRITICAL FIX: Remove from ZSET to update position for other users
-	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+	eventQueueKey := fmt.Sprintf("queue:event:{%s}", queueData.EventID)
 	if err := q.redisClient.ZRem(ctx, eventQueueKey, req.WaitingToken).Err(); err != nil {
 		q.logger.WithError(err).Warn("Failed to remove from ZSET queue")
 	}
@@ -440,7 +440,7 @@ func (q *QueueHandler) Leave(c *fiber.Ctx) error {
 
 	// Remove from ZSET event queue
 	if err == nil {
-		eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+		eventQueueKey := fmt.Sprintf("queue:event:{%s}", queueData.EventID)
 		if err := q.redisClient.ZRem(ctx, eventQueueKey, waitingToken).Err(); err != nil {
 			q.logger.WithError(err).Warn("Failed to remove from ZSET queue")
 		}
@@ -529,7 +529,7 @@ func (q *QueueHandler) calculatePositionAndETA(ctx context.Context, queueData *Q
 	}
 
 	// Fallback 2: Legacy ZSET (compatibility)
-	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+	eventQueueKey := fmt.Sprintf("queue:event:{%s}", queueData.EventID)
 	rank, err := q.redisClient.ZRank(ctx, eventQueueKey, waitingToken).Result()
 	if err != nil {
 		q.logger.WithError(err).WithFields(logrus.Fields{
@@ -555,7 +555,7 @@ func (q *QueueHandler) calculatePositionAndETA(ctx context.Context, queueData *Q
 
 func (q *QueueHandler) isEligibleForEntry(ctx context.Context, queueData *QueueData, waitingToken string) bool {
 	// 1. Get current position first
-	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
+	eventQueueKey := fmt.Sprintf("queue:event:{%s}", queueData.EventID)
 	rank, err := q.redisClient.ZRank(ctx, eventQueueKey, waitingToken).Result()
 	if err != nil {
 		q.logger.WithFields(logrus.Fields{
