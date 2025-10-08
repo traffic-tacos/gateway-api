@@ -114,8 +114,8 @@ func NewTokenBucketAdmission(redis redis.UniversalClient, eventID string, logger
 	return &TokenBucketAdmission{
 		redisClient: redis,
 		eventID:     eventID,
-		capacity:    100,  // Allow burst of 100 users
-		refillRate:  10.0, // Steady state: 10 users/second
+		capacity:    500,  // 🚨 CRITICAL FIX: 100 → 500 (52% 403 에러율 해결)
+		refillRate:  50.0, // 🚨 CRITICAL FIX: 10 → 50 users/second (admission control)
 		logger:      logger,
 	}
 }
