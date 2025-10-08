@@ -14,6 +14,7 @@ type Manager struct {
 	Auth        *AuthMiddleware
 	Idempotency *IdempotencyMiddleware
 	RateLimit   *RateLimitMiddleware
+	ErrorLogger *ErrorLoggerMiddleware
 	RedisClient redis.UniversalClient // 🔴 Changed to UniversalClient for Cluster support
 	Config      *config.Config
 	Logger      *logrus.Logger
@@ -39,10 +40,14 @@ func NewManager(cfg *config.Config, logger *logrus.Logger) (*Manager, error) {
 	// Initialize rate limit middleware
 	rateLimitMiddleware := NewRateLimitMiddleware(&cfg.RateLimit, redisClient, logger)
 
+	// Initialize error logger middleware
+	errorLoggerMiddleware := NewErrorLoggerMiddleware(logger)
+
 	return &Manager{
 		Auth:        authMiddleware,
 		Idempotency: idempotencyMiddleware,
 		RateLimit:   rateLimitMiddleware,
+		ErrorLogger: errorLoggerMiddleware,
 		RedisClient: redisClient,
 		Config:      cfg,
 		Logger:      logger,

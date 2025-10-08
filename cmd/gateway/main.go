@@ -151,6 +151,9 @@ func main() {
 		logger.WithError(err).Fatal("Failed to initialize middleware manager")
 	}
 
+	// Add error logger middleware (should be early in the chain to capture all errors)
+	app.Use(middlewareManager.ErrorLogger.Handle())
+
 	// Initialize AWS SDK and DynamoDB client
 	dynamoClient, err := initializeDynamoDB(cfg, logger)
 	if err != nil {
