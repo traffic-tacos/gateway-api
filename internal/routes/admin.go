@@ -38,8 +38,9 @@ func (a *AdminHandler) FlushTestData(c *fiber.Ctx) error {
 	patterns := []string{
 		// Queue patterns (specific for better Cluster Mode compatibility)
 		"queue:waiting:*",     // Queue waiting tokens
-		"queue:event:*",       // Queue event data
+		"queue:event:*",       // Queue event data (ZSET for global queue)
 		"queue:reservation:*", // Queue reservation tokens
+		"position_index:*",    // ✅ NEW: Position index ZSET for fast O(log N) lookup
 		// Stream patterns
 		"stream:event:*", // Redis Streams for events
 		// Token and auth patterns
@@ -215,7 +216,7 @@ func (a *AdminHandler) GetStats(c *fiber.Ctx) error {
 	}
 
 	// Count keys by pattern
-	patterns := []string{"queue:*", "idempotency:*", "heartbeat:*", "dedupe:*", "stream:*"}
+	patterns := []string{"queue:*", "position_index:*", "idempotency:*", "heartbeat:*", "dedupe:*", "stream:*"}
 	keyCount := make(map[string]int64)
 
 	for _, pattern := range patterns {
