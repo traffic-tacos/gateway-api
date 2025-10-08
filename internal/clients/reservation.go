@@ -13,6 +13,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 )
 
 type ReservationClient struct {
@@ -32,6 +34,11 @@ type ErrorResponse struct {
 func NewReservationClient(cfg *config.ReservationAPIConfig, logger *logrus.Logger) (*ReservationClient, error) {
 	// Setup gRPC connection options
 	var opts []grpc.DialOption
+
+	// Add OTEL instrumentation for distributed tracing
+	opts = append(opts,
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+	)
 
 	if cfg.TLSEnabled {
 		creds := credentials.NewTLS(&tls.Config{
