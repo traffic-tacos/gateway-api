@@ -305,7 +305,8 @@ func NewRedisUniversalClient(cfg *config.RedisConfig, awsCfg *config.AWSConfig, 
 // RedisHealthCheck middleware that checks Redis connectivity
 func RedisHealthCheck(redisClient redis.UniversalClient, logger *logrus.Logger) func() error {
 	return func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// ✅ Increased timeout for stable health checks under high load (Pool Size 150 x 70 pods)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if err := redisClient.Ping(ctx).Err(); err != nil {
