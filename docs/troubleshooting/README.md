@@ -5,6 +5,8 @@ Gateway API의 운영 중 발생할 수 있는 문제들과 해결 방법을 정
 ## 📚 문서 목록
 
 ### Redis 관련
+
+#### 연결 및 설정 문제
 - **[REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md](./REDIS_UNIVERSALCLIENT_CLUSTER_MODE_FIX.md)** - 🔴 **필독!** Redis UniversalClient 자동 감지 실패 문제
   - **증상**: `QUEUE_ERROR: Failed to join queue` (Hash tag 적용 후에도 500 에러)
   - **원인**: UniversalClient가 Configuration Endpoint(1개 주소)를 Standalone으로 오인
@@ -15,6 +17,14 @@ Gateway API의 운영 중 발생할 수 있는 문제들과 해결 방법을 정
   - **원인**: Hash Tag 미사용으로 인한 CROSSSLOT 에러
   - **해결**: dedupeKey에 `{eventID}` hash tag 추가
   - **참고**: 이 수정은 필요하지만, UniversalClient 문제가 함께 해결되어야 작동함
+
+#### 성능 최적화
+- **[REDIS_CPU_OPTIMIZATION_KEYS_BOTTLENECK.md](./REDIS_CPU_OPTIMIZATION_KEYS_BOTTLENECK.md)** - 🔥 **Critical!** Redis CPU 100% 문제 해결
+  - **증상**: 1만 RPS에서 Redis Cluster CPU 100% 도달, 추가 트래픽 처리 불가
+  - **원인**: Status API에서 KEYS 명령어 사용 (O(N) blocking operation)
+  - **해결**: Position Index (ZSET) 기반 O(log N) 조회로 변경
+  - **효과**: CPU 100% → 40% (10k RPS), 30k RPS 목표 달성 가능
+  - **성능**: ~100x faster than KEYS scan
 
 ## 🔍 문제 유형별 찾기
 
@@ -28,8 +38,10 @@ Gateway API의 운영 중 발생할 수 있는 문제들과 해결 방법을 정
 - ElastiCache AUTH 에러 → (작성 예정)
 
 ### 성능 문제
-- 느린 응답 시간 → (작성 예정)
-- Hot Shard 문제 → (작성 예정)
+- Redis CPU 100% → 🔥 **[REDIS_CPU_OPTIMIZATION_KEYS_BOTTLENECK.md](./REDIS_CPU_OPTIMIZATION_KEYS_BOTTLENECK.md)** (KEYS 명령어 제거)
+- 느린 응답 시간 → [REDIS_CPU_OPTIMIZATION_KEYS_BOTTLENECK.md](./REDIS_CPU_OPTIMIZATION_KEYS_BOTTLENECK.md) (Position Index 최적화)
+- Hot Shard 문제 → [REDIS_CLUSTER_HASH_TAG_FIX.md](./REDIS_CLUSTER_HASH_TAG_FIX.md) (Hash Tag 사용)
+- 메모리 사용량 높음 → (작성 예정: GOMEMLIMIT, GOGC 튜닝)
 
 ## 📝 문서 작성 가이드
 
@@ -93,4 +105,4 @@ kubectl rollout undo deployment/gateway-api -n tacos-app
 
 ---
 
-**최종 업데이트**: 2025-10-07
+**최종 업데이트**: 2025-10-08
