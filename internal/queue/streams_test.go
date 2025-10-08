@@ -250,7 +250,7 @@ func TestStreamQueue_GlobalPosition(t *testing.T) {
 	// User A enqueues 3 messages
 	for i := 0; i < 3; i++ {
 		token := fmt.Sprintf("a-token-%d", i)
-		result, err := sq.Enqueue(ctx, eventID, "user-a", token)
+		_, err := sq.Enqueue(ctx, eventID, "user-a", token)
 		require.NoError(t, err)
 
 		// Add to Position Index (simulating Join API)
