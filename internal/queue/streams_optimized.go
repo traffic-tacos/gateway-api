@@ -9,93 +9,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// calculateGlobalPositionOptimized uses SCAN instead of KEYS for better performance
-// ✅ Non-blocking, cursor-based iteration
-// ✅ Pipeline for batch XLen calls
-// ✅ ~10x faster than KEYS approach
-func (sq *StreamQueue) calculateGlobalPositionOptimized(
-	ctx context.Context,
-	eventID string,
-	userID string,
-	streamID string,
-) int {
-	pattern := fmt.Sprintf("stream:event:{%s}:user:*", eventID)
-	userStreamKey := fmt.Sprintf("stream:event:{%s}:user:%s", eventID, userID)
-
-	// Use SCAN instead of KEYS (non-blocking, cursor-based)
-	var cursor uint64
-	var streamKeys []string
-	batchSize := 100
-
-	// SCAN in batches
-	for {
-		keys, nextCursor, err := sq.redis.Scan(ctx, cursor, pattern, int64(batchSize)).Result()
-		if err != nil {
-			sq.logger.WithError(err).Warn("Failed to SCAN stream keys")
-			return 1 // Fallback
-		}
-
-		streamKeys = append(streamKeys, keys...)
-		cursor = nextCursor
-
-		// Exit when cursor returns to 0 (scan complete)
-		if cursor == 0 {
-			break
-		}
-
-		// Safety limit: max 1000 streams per event
-		if len(streamKeys) >= 1000 {
-			sq.logger.WithFields(logrus.Fields{
-				"event_id": eventID,
-				"count":    len(streamKeys),
-			}).Warn("Too many streams, truncating position calculation")
-			break
-		}
-	}
-
-	if len(streamKeys) == 0 {
-		return 1
-	}
-
-	// Use pipeline to batch XLen calls
-	pipe := sq.redis.Pipeline()
-	cmds := make(map[string]*redis.IntCmd)
-
-	for _, key := range streamKeys {
-		if key == userStreamKey {
-			// For our own stream, use XRANGE to count messages before our ID
-			continue
-		}
-		// For other streams, batch XLen
-		cmds[key] = pipe.XLen(ctx, key)
-	}
-
-	// Execute pipeline
-	_, err := pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
-		sq.logger.WithError(err).Warn("Pipeline execution failed")
-		return 1
-	}
-
-	// Sum up lengths from other streams
-	totalAhead := 0
-	for key, cmd := range cmds {
-		length, err := cmd.Result()
-		if err == nil {
-			totalAhead += int(length)
-		} else {
-			sq.logger.WithError(err).WithField("key", key).Debug("Failed to get stream length")
-		}
-	}
-
-	// Handle our own stream
-	entries, err := sq.redis.XRange(ctx, userStreamKey, "-", streamID).Result()
-	if err == nil && len(entries) > 0 {
-		totalAhead += len(entries) - 1
-	}
-
-	return totalAhead + 1
-}
+// Note: calculateGlobalPositionOptimized was removed
+// Replaced by Position Index ZSET approach in streams.go:calculateGlobalPosition()
+// ZSET ZRANK is O(log N), much faster than any SCAN-based approach O(N)
 
 // CalculateApproximatePosition uses Redis ZSET for fast position lookup
 // ✅ O(log N) time complexity
