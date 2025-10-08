@@ -107,11 +107,11 @@ func (sq *StreamQueue) CalculateApproximatePosition(
 	waitingToken string,
 ) (int, error) {
 	// Use ZSET for fast position lookup
-	// Key: queue:event:{eventID}:position
+	// Key: position_index:{eventID} (matches Join API)
 	// Score: timestamp (Unix milliseconds)
 	// Member: waitingToken
 
-	positionKey := fmt.Sprintf("queue:event:{%s}:position", eventID)
+	positionKey := fmt.Sprintf("position_index:{%s}", eventID)
 
 	// Get rank (position) in sorted set
 	rank, err := sq.redis.ZRank(ctx, positionKey, waitingToken).Result()
@@ -134,7 +134,7 @@ func (sq *StreamQueue) UpdatePositionIndex(
 	eventID string,
 	waitingToken string,
 ) error {
-	positionKey := fmt.Sprintf("queue:event:{%s}:position", eventID)
+	positionKey := fmt.Sprintf("position_index:{%s}", eventID)
 
 	// Add to ZSET with current timestamp as score
 	score := float64(time.Now().UnixMilli())
