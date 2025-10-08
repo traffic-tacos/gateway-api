@@ -345,18 +345,18 @@ func (q *QueueHandler) calculatePositionAndETA(
 ### Redis Operations 비교
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ Operation      │ Before         │ After                 │
-├─────────────────────────────────────────────────────────┤
+┌───────────────────────────────────────────────────────────┐
+│ Operation      │ Before         │ After                   │
+├───────────────────────────────────────────────────────────┤
 │ Join API       │ Lua + Stream   │ + ZADD (Position Index) │
-│                │ + ZADD         │                       │
-├─────────────────────────────────────────────────────────┤
-│ Status API     │ KEYS (O(N))    │ ZRANK (O(log N))      │
-│ (Position)     │ + N × XLEN     │ Single lookup         │
-│                │ Blocking       │ Non-blocking          │
-├─────────────────────────────────────────────────────────┤
-│ Leave/Enter    │ ZREM           │ ZREM + ZREM (Index)   │
-└─────────────────────────────────────────────────────────┘
+│                │ + ZADD         │                         │
+├───────────────────────────────────────────────────────────┤
+│ Status API     │ KEYS (O(N))    │ ZRANK (O(log N))        │
+│ (Position)     │ + N × XLEN     │ Single lookup           │
+│                │ Blocking       │ Non-blocking            │
+├───────────────────────────────────────────────────────────┤
+│ Leave/Enter    │ ZREM           │ ZREM + ZREM (Index)     │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ### 시간 복잡도
