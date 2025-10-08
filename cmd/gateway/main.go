@@ -22,6 +22,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/helmet"
+	"github.com/gofiber/fiber/v2/middleware/pprof"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/sirupsen/logrus"
@@ -128,6 +129,9 @@ func main() {
 	}))
 	// OTEL use
 	app.Use(otelfiber.Middleware())
+
+	// pprof for memory profiling (accessible at /debug/pprof/)
+	app.Use(pprof.New())
 
 	// Initialize middleware manager
 	middlewareManager, err := middleware.NewManager(cfg, logger)
