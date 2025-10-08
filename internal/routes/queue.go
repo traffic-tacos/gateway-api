@@ -294,8 +294,10 @@ func (q *QueueHandler) Status(c *fiber.Ctx) error {
 	currentPosition, eta := q.calculatePositionAndETA(c.Context(), queueData, waitingToken)
 	waitingTime := int(time.Since(queueData.JoinedAt).Seconds())
 
+	// 🔴 CRITICAL FIX: Status API should NOT consume tokens, only check eligibility
 	// Check if user is ready for entry (eligible to call Enter API)
-	readyForEntry := q.isEligibleForEntry(c.Context(), queueData, waitingToken)
+	// We check Position + Wait Time only, NOT Token Bucket (to avoid consuming tokens)
+	readyForEntry := q.isEligibleForEntryWithoutTokenConsumption(c.Context(), queueData, waitingToken)
 
 	return c.JSON(QueueStatusResponse{
 		Status:        queueData.Status,
@@ -633,6 +635,58 @@ func (q *QueueHandler) isEligibleForEntry(ctx context.Context, queueData *QueueD
 	}).Info("Eligibility check completed")
 
 	return admitted
+}
+
+// isEligibleForEntryWithoutTokenConsumption checks eligibility WITHOUT consuming tokens
+// This is used by Status API to avoid consuming tokens during polling
+// Only checks: Position (≤100) + Minimum Wait Time
+// Does NOT check: Token Bucket (that would consume a token!)
+func (q *QueueHandler) isEligibleForEntryWithoutTokenConsumption(ctx context.Context, queueData *QueueData, waitingToken string) bool {
+	// 1. Get current position first
+	eventQueueKey := fmt.Sprintf("queue:event:{%s}", queueData.EventID)
+	rank, err := q.redisClient.ZRank(ctx, eventQueueKey, waitingToken).Result()
+	if err != nil {
+		q.logger.WithFields(logrus.Fields{
+			"waiting_token": waitingToken,
+			"error":         err,
+		}).Debug("Not eligible: failed to get rank")
+		return false
+	}
+
+	position := int(rank) + 1
+
+	// 2. Position check (top 100 only)
+	if position > 100 {
+		return false
+	}
+
+	// 3. Dynamic minimum wait time based on position
+	waitTime := time.Since(queueData.JoinedAt)
+	var minWaitTime time.Duration
+
+	if position <= 10 {
+		minWaitTime = 0 * time.Second // Top 10: immediate entry! 🎉
+	} else if position <= 50 {
+		minWaitTime = 2 * time.Second
+	} else {
+		minWaitTime = 5 * time.Second
+	}
+
+	if waitTime < minWaitTime {
+		return false
+	}
+
+	// ✅ Status API: Position + Wait Time checks passed
+	// Token Bucket will be checked only when user actually calls Enter API
+	q.logger.WithFields(logrus.Fields{
+		"waiting_token": waitingToken,
+		"position":      position,
+		"wait_time":     waitTime.Seconds(),
+		"min_wait_time": minWaitTime.Seconds(),
+		"check_type":    "without_token_consumption",
+	}).Debug("Eligibility check for Status API completed")
+
+	return true
 }
 
 // Error response helpers
