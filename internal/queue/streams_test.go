@@ -242,17 +242,37 @@ func TestStreamQueue_GlobalPosition(t *testing.T) {
 		}
 	}()
 
+	// Setup: Create Position Index ZSET for accurate position calculation
+	// This simulates the real Join API flow
+	positionKey := fmt.Sprintf("position_index:{%s}", eventID)
+	score := float64(time.Now().Unix())
+
 	// User A enqueues 3 messages
 	for i := 0; i < 3; i++ {
-		_, _ = sq.Enqueue(ctx, eventID, "user-a", fmt.Sprintf("a-token-%d", i))
+		token := fmt.Sprintf("a-token-%d", i)
+		result, err := sq.Enqueue(ctx, eventID, "user-a", token)
+		require.NoError(t, err)
+
+		// Add to Position Index (simulating Join API)
+		redisClient.ZAdd(ctx, positionKey, redis.Z{
+			Score:  score + float64(i),
+			Member: token,
+		})
 	}
 
 	// User B enqueues 2 messages
 	var lastResult *EnqueueResult
 	for i := 0; i < 2; i++ {
-		result, err := sq.Enqueue(ctx, eventID, "user-b", fmt.Sprintf("b-token-%d", i))
+		token := fmt.Sprintf("b-token-%d", i)
+		result, err := sq.Enqueue(ctx, eventID, "user-b", token)
 		require.NoError(t, err)
 		lastResult = result
+
+		// Add to Position Index (simulating Join API)
+		redisClient.ZAdd(ctx, positionKey, redis.Z{
+			Score:  score + float64(3+i),
+			Member: token,
+		})
 	}
 
 	// Last message from user B should be at position 5
