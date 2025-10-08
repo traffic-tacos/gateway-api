@@ -5,6 +5,22 @@
 `POST /api/v1/queue/enter` API는 대기열에서 본 시스템으로 입장하기 위한 엔드포인트입니다.
 403 Forbidden 에러는 **사용자가 입장 조건을 충족하지 못했을 때** 발생합니다.
 
+## 🔴 **CRITICAL FIX (2025-10-08)**
+
+**Token Bucket 중복 소비 버그 수정:**
+- ❌ **Before**: Status API가 polling 중 Token을 소비 → Enter 시 403
+- ✅ **After**: Status API는 Token 체크 안함 → Enter 성공!
+
+**상세 내용:**
+- Status API: `isEligibleForEntryWithoutTokenConsumption()` 사용
+  - Position ≤ 100 + Wait Time만 체크
+  - Token Bucket 체크 안함 (소비 없음)
+- Enter API: `isEligibleForEntry()` 사용 (기존 로직)
+  - Position + Wait Time + **Token Bucket** 체크
+  - Token 소비는 Enter 시에만 발생
+
+**이제 `ready_for_entry=true`일 때 Enter하면 403이 나오지 않습니다!** ✅
+
 ---
 
 ## 🔍 403 에러 발생 원인 (3가지)
@@ -113,10 +129,10 @@ curl -X POST https://api.traffictacos.store/api/v1/queue/enter \
 
 ---
 
-### 3️⃣ **Token Bucket Rate Limiting**
+### 3️⃣ **Token Bucket Rate Limiting** (Enter API Only!)
 
 ```go
-// internal/routes/queue.go:604-614
+// internal/routes/queue.go:604-637
 // 🔴 Top 10 users bypass token bucket (VIP treatment)
 if position <= 10 {
     q.logger.Info("Eligibility check completed - VIP bypass")
@@ -124,14 +140,18 @@ if position <= 10 {
 }
 
 // Token Bucket check for position 11-100
-if !q.tryAcquireToken(ctx, queueData.EventID) {
-    q.logger.Debug("Not eligible: rate limit exceeded")
-    return false // 403 Forbidden
+bucket := queue.NewTokenBucketAdmission(q.redisClient, queueData.EventID, q.logger)
+admitted, err := bucket.TryAdmit(ctx, queueData.UserID)
+
+if err != nil {
+    return false
 }
+
+return admitted // 403 if not admitted
 ```
 
 **조건:**
-- Position 11-100인 사용자는 Token Bucket 체크
+- Position 11-100인 사용자는 Token Bucket 체크 (Top 10은 bypass)
 - **Admission Control**에서 초당 허용 인원 제한
 - Token이 부족하면 403
 
@@ -140,8 +160,13 @@ if !q.tryAcquireToken(ctx, queueData.EventID) {
 - **Refill Rate**: 10 tokens/sec
 - **Purpose**: 백엔드 서비스 보호 (1,000 RPS 제한)
 
+**🚨 IMPORTANT: Status API는 Token을 소비하지 않습니다!**
+- ✅ Status API polling은 Token에 영향 없음
+- ✅ Token은 실제 Enter API 호출 시에만 소비
+- ✅ `ready_for_entry=true` → Enter 시도 → Token 부족 시에만 403
+
 **해결 방법:**
-- 재시도 (backoff 후)
+- 재시도 (1초 후, Token refill 대기)
 - Token이 refill 될 때까지 대기 (100ms ~ 1초)
 
 **테스트 재현:**
@@ -155,7 +180,7 @@ for i in {1..100}; do
 done
 wait
 
-# 101번째 요청:
+# 101번째 요청 (Token 부족):
 {
   "error": {
     "code": "NOT_READY",
@@ -163,15 +188,18 @@ wait
     "trace_id": "..."
   }
 }
+
+# 1초 후 재시도 (Token refill) → 200 OK! ✅
 ```
 
 **로그 예시:**
 ```json
 {
-  "level": "debug",
-  "msg": "Not eligible: rate limit exceeded",
+  "level": "info",
+  "msg": "Eligibility check completed",
   "waiting_token": "16422802-...",
   "position": 50,
+  "admitted": false,
   "event_id": "evt_2025_1001"
 }
 ```
@@ -304,15 +332,16 @@ const pollStatus = async () => {
 
   console.log(`Position: ${status.position}, Ready: ${status.ready_for_entry}`);
 
-  // 3. Only attempt Enter when ready_for_entry is true
-  if (status.ready_for_entry && status.position <= 100) {
+  // 3. ✅ NEW: ready_for_entry=true면 즉시 Enter 시도 가능!
+  // Status API는 Token을 소비하지 않으므로 안전
+  if (status.ready_for_entry) {
     tryEnter();
   } else {
     setTimeout(pollStatus, 3000); // Poll again after 3s
   }
 };
 
-// 4. Enter with retry logic
+// 4. Enter with retry logic (Token Bucket 대응)
 const tryEnter = async (retryCount = 0) => {
   const enterResponse = await fetch('/api/v1/queue/enter', {
     method: 'POST',
@@ -326,20 +355,38 @@ const tryEnter = async (retryCount = 0) => {
   });
 
   if (enterResponse.status === 403) {
-    // Token Bucket 일 가능성 → 재시도
+    // ⚠️ Token Bucket 일시 부족 가능성 → 1초 후 재시도
+    // (Position 11-100만 해당, Top 10은 403 안 남)
     if (retryCount < 3) {
-      await sleep(1000); // 1초 대기
+      console.log(`Token Bucket 대기 중... (${retryCount + 1}/3)`);
+      await sleep(1000); // 1초 대기 (Token refill)
       return tryEnter(retryCount + 1);
     } else {
-      alert('입장에 실패했습니다. 잠시 후 다시 시도해주세요.');
+      // 3번 재시도 실패 → Position 변동 가능성
+      alert('입장 조건이 변경되었습니다. 잠시 후 다시 시도해주세요.');
+      setTimeout(pollStatus, 3000); // Status 다시 확인
     }
   } else if (enterResponse.ok) {
     const { reservation_token } = await enterResponse.json();
-    console.log('Reservation Token:', reservation_token);
+    console.log('✅ Reservation Token:', reservation_token);
     // Redirect to reservation page
+    window.location.href = `/reservation?token=${reservation_token}`;
+  } else {
+    console.error('Unexpected error:', enterResponse.status);
   }
 };
 ```
+
+**주요 변경사항 (2025-10-08 Fix):**
+- ✅ **Status API polling은 Token 소비 안함**
+  - `ready_for_entry=true`일 때 바로 Enter 가능
+  - 불필요한 Position 체크 제거 (`status.position <= 100` 조건 불필요)
+- ✅ **403 에러는 Token Bucket 부족 시에만 발생**
+  - Position 11-100: Token refill 대기 (1초 후 재시도)
+  - Top 10: Token Bucket bypass (403 없음)
+- ✅ **재시도 로직 간소화**
+  - 1초 간격으로 최대 3번 재시도
+  - 실패 시 Status polling으로 복귀
 
 ---
 
