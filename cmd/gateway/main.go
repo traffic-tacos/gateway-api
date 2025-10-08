@@ -27,16 +27,8 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/sirupsen/logrus"
 
-	"log"
-
 	"go.opentelemetry.io/otel"
-	stdout "go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
-	"go.opentelemetry.io/otel/sdk/resource"
-
-	//"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 )
 
 // @title Gateway API
@@ -74,19 +66,39 @@ func main() {
 		logger.WithError(err).Fatal("Failed to initialize metrics")
 	}
 
+	// Initialize OTLP metrics exporter
+	ctx := context.Background()
+	metricsShutdown, err := metrics.InitOTLP(ctx, cfg.Observability.OTLPEndpoint, logger)
+	if err != nil {
+		logger.WithError(err).Warn("Failed to initialize OTLP metrics exporter, continuing with Prometheus only")
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := metricsShutdown(shutdownCtx); err != nil {
+				logger.WithError(err).Error("Failed to shutdown OTLP metrics exporter")
+			}
+		}()
+	}
+
 	// Initialize tracing
-	tracingShutdown, err := setupTracing(cfg, logger)
+	tracingShutdown, err := middleware.InitTracing(&cfg.Observability, logger)
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to setup tracing")
 	}
-	defer tracingShutdown()
-
-	tp := initTracer()
 	defer func() {
-		if err := tp.Shutdown(context.Background()); err != nil {
-			log.Printf("Error shutting down tracer provider: %v", err)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			logger.WithError(err).Error("Failed to shutdown tracing")
 		}
 	}()
+
+	// Set global text map propagator for distributed tracing
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
@@ -165,41 +177,6 @@ func main() {
 	if err := app.Listen(":" + cfg.Server.Port); err != nil {
 		logger.WithError(err).Fatal("Server failed to start")
 	}
-}
-
-func setupTracing(cfg *config.Config, logger *logrus.Logger) (func(), error) {
-	shutdown, err := middleware.InitTracing(&cfg.Observability, logger)
-	if err != nil {
-		return nil, err
-	}
-
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := shutdown(ctx); err != nil {
-			logger.WithError(err).Error("Failed to shutdown tracing")
-		}
-	}, nil
-}
-
-// Init Tracing
-func initTracer() *sdktrace.TracerProvider {
-	exporter, err := stdout.New(stdout.WithPrettyPrint())
-	if err != nil {
-		log.Fatal(err)
-	}
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(
-			resource.NewWithAttributes(
-				semconv.SchemaURL,
-				semconv.ServiceNameKey.String("my-service"),
-			)),
-	)
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
-	return tp
 }
 
 func initializeDynamoDB(cfg *config.Config, logger *logrus.Logger) (*dynamodb.Client, error) {

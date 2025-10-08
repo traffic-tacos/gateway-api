@@ -1,13 +1,23 @@
 package metrics
 
 import (
+	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/adaptor"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sirupsen/logrus"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 )
 
 var (
@@ -96,7 +106,7 @@ var (
 
 // Init initializes the metrics
 func Init() error {
-	// Register metrics
+	// Register Prometheus metrics
 	prometheus.MustRegister(
 		httpRequestsTotal,
 		httpRequestDuration,
@@ -110,6 +120,52 @@ func Init() error {
 	)
 
 	return nil
+}
+
+// InitOTLP initializes OTLP metrics exporter
+func InitOTLP(ctx context.Context, otlpEndpoint string, logger *logrus.Logger) (func(context.Context) error, error) {
+	// Clean endpoint (remove http:// or https:// prefix)
+	endpoint := strings.TrimPrefix(otlpEndpoint, "http://")
+	endpoint = strings.TrimPrefix(endpoint, "https://")
+
+	// Create OTLP HTTP exporter for metrics
+	exporter, err := otlpmetrichttp.New(ctx,
+		otlpmetrichttp.WithEndpoint(endpoint),
+		otlpmetrichttp.WithInsecure(), // Use WithTLSClientConfig() for production with TLS
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create resource with service information
+	res, err := resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceNameKey.String("gateway-api"),
+			semconv.ServiceVersionKey.String("1.3.1"),
+			attribute.String("environment", "production"),
+		),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create meter provider with periodic reader
+	meterProvider := metric.NewMeterProvider(
+		metric.WithReader(metric.NewPeriodicReader(exporter,
+			metric.WithInterval(10*time.Second),
+		)),
+		metric.WithResource(res),
+	)
+
+	// Set global meter provider
+	otel.SetMeterProvider(meterProvider)
+
+	logger.WithFields(logrus.Fields{
+		"otlp_endpoint": endpoint,
+	}).Info("OTLP metrics exporter initialized")
+
+	// Return shutdown function
+	return meterProvider.Shutdown, nil
 }
 
 // HTTPMetricsMiddleware records HTTP metrics
