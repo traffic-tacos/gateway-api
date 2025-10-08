@@ -242,7 +242,7 @@ Redis는 이 모든 요구사항을 만족합니다.
 
 ---
 
-## 📜 5장: 설계 구조
+## 📜 5장: 설계 구조 및 용량 산정
 
 ### 슬라이드
 ```
@@ -264,7 +264,7 @@ Browser (30만 명)
 │  │  - TTL: 자동 만료        │   │
 │  └──────────────────────────┘   │
 │                                  │
-│  입장 제어 (1,000 RPS)          │
+│  입장 제어 (1,000 RPS)          │ ← 왜 1,000 RPS?
 └─────────────────────────────────┘
     ↓
     ↓ 입장 허용된 사용자만 통과
@@ -318,7 +318,176 @@ Gateway + Redis가 **방파제** 역할을 합니다.
 
 ---
 
-## 📜 6장: 초기 구현 및 테스트
+## 📜 5-1장: 왜 1,000 RPS로 입장 제어를 했는가?
+
+### 슬라이드
+```
+"입장 제어 용량 산정"
+
+질문: "왜 하필 1,000 RPS인가?"
+
+용량 산정 과정:
+
+1️⃣ 좌석 수 기준
+   - 티켓: 10,000석
+   - 판매 시간: 30분 이내 목표
+   - 필요 처리량: 10,000석 ÷ 1,800초 = 5.5 RPS
+   → 너무 느림 ❌
+
+2️⃣ 사용자 경험 기준
+   - 30만 명 대기
+   - 평균 대기 시간: 5분 이내 목표
+   - 필요 처리량: 300,000명 ÷ 300초 = 1,000 RPS
+   → 적절함 ✅
+
+3️⃣ Backend 처리 능력 검증
+   - Reservation API: 3,000 RPS 가능 (부하 테스트 결과)
+   - Inventory API: 5,000 RPS 가능 (gRPC 고성능)
+   - DynamoDB: On-demand 모드 (무제한)
+   → 1,000 RPS는 여유로움 ✅
+
+4️⃣ 비용 고려
+   - DynamoDB 쓰기: $1.25 per 1M writes
+   - 1,000 RPS = 3,600,000 writes/hour
+   - 30분 = 1,800,000 writes = $2.25
+   → 감당 가능 ✅
+
+결론: 1,000 RPS가 최적!
+```
+
+### 멘트
+
+여기서 중요한 질문이 하나 있습니다.
+**"왜 하필 1,000 RPS로 입장 제어를 했는가?"**
+
+이 숫자는 아무렇게나 정한 게 아닙니다.
+용량 산정 과정을 거쳤습니다.
+
+**첫째, 좌석 수 기준으로 계산했습니다.**
+- 티켓: 10,000석
+- 판매 시간: 30분 이내 목표
+- 필요 처리량: 10,000석 ÷ 1,800초 = **5.5 RPS**
+
+하지만 이건 너무 느립니다.
+30만 명이 5분 넘게 기다려야 합니다.
+사용자 경험이 나쁩니다.
+
+**둘째, 사용자 경험 기준으로 계산했습니다.**
+- 30만 명이 대기 중
+- 평균 대기 시간: 5분 이내 목표
+- 필요 처리량: 300,000명 ÷ 300초 = **1,000 RPS**
+
+이게 더 합리적입니다.
+5분이면 사용자가 견딜 만한 시간입니다.
+
+**셋째, Backend가 처리할 수 있는지 검증했습니다.**
+- **Reservation API**: 사전 부하 테스트 결과 3,000 RPS 가능
+- **Inventory API**: gRPC 고성능으로 5,000 RPS 가능
+- **DynamoDB**: On-demand 모드로 무제한 확장 가능
+
+1,000 RPS는 Backend 입장에서 매우 여유롭습니다.
+30% 수준의 부하입니다.
+
+**넷째, 비용을 고려했습니다.**
+- DynamoDB 쓰기 비용: $1.25 per 1M writes
+- 1,000 RPS = 3,600,000 writes/hour
+- 30분 티켓팅 = 1,800,000 writes = **$2.25**
+
+감당 가능한 비용입니다.
+
+**결론:**
+1,000 RPS가 **사용자 경험, Backend 용량, 비용** 측면에서 최적의 균형점이었습니다.
+
+이 숫자 하나를 정하는 데도,
+이렇게 많은 고민이 들어갑니다.
+
+---
+
+## 📜 6장: Redis 인스턴스 선정
+
+### 슬라이드
+```
+"ElastiCache 인스턴스 크기 결정"
+
+질문: "어떤 Redis 인스턴스를 써야 하나?"
+
+고려 사항:
+
+1️⃣ 메모리 요구량
+   - 대기열 데이터: 30만 명 × 1KB = 300MB
+   - 인덱스 데이터: ZSET × 5 = 150MB
+   - 버퍼: 2배 여유 = 900MB
+   → 최소 2GB 이상 필요
+
+2️⃣ 네트워크 처리량
+   - Status API: 30만 명 × 0.2 RPS = 60k RPS
+   - 각 요청: 1KB 응답
+   - 필요 대역폭: 60MB/s
+   → 네트워크 성능 중요
+
+3️⃣ CPU 처리 능력
+   - ZRANK 연산: O(log N)
+   - 60k RPS × 0.01ms = 600ms CPU
+   → 멀티 코어 필요
+
+4️⃣ 가용성 및 확장성
+   - Cluster Mode: 5 shards (데이터 분산)
+   - Read Replica: 각 샤드당 1개 (읽기 분산)
+   - 총 10 nodes
+   → 고가용성 + 성능
+
+선택: cache.m7g.xlarge (4 vCPU, 13GB RAM)
+       × 5 shards × 2 (replica) = 10 nodes
+```
+
+### 멘트
+
+아키텍처를 설계했으니, 이제 실제 인스턴스를 선택해야 합니다.
+
+**"어떤 Redis 인스턴스를 써야 하나?"**
+
+**첫째, 메모리 요구량을 계산했습니다.**
+- 대기열 데이터: 30만 명 × 1KB (토큰 + 메타데이터) = 300MB
+- Position Index: ZSET 구조 × 5개 이벤트 = 150MB
+- 버퍼 및 기타: 2배 여유분 = 450MB
+- 총합: 약 900MB
+
+최소 2GB 이상의 메모리가 필요합니다.
+
+**둘째, 네트워크 처리량을 계산했습니다.**
+- Status API: 30만 명이 5초마다 조회 = 60k RPS
+- 각 요청당 응답: 약 1KB (순번 + 메타데이터)
+- 필요 네트워크 대역폭: 60MB/s
+
+네트워크 성능이 중요합니다.
+
+**셋째, CPU 처리 능력을 예측했습니다.**
+- ZRANK 연산: O(log N) = log(300,000) ≈ 18 비교
+- 60k RPS × 0.01ms = 600ms CPU 시간/초
+- 멀티 코어가 필요합니다
+
+**넷째, 가용성과 확장성을 고려했습니다.**
+- **Cluster Mode**: 5개 샤드로 데이터 분산
+  - 각 샤드: 60MB 메모리, 12k RPS 처리
+- **Read Replica**: 각 샤드당 1개 복제본
+  - 읽기 부하 분산
+  - 장애 대응 (자동 failover)
+- **총 10 nodes**: 5 primary + 5 replica
+
+**선택: cache.m7g.xlarge**
+- vCPU: 4 (충분한 처리 능력)
+- 메모리: 13GB (여유롭게)
+- 네트워크: 최대 12.5 Gbps (125MB/s)
+- ARM64 Graviton: 비용 효율적
+
+**구성: 5 shards × 2 (primary + replica) = 10 nodes**
+
+이 구성으로 60k RPS Status API를 처리할 수 있습니다.
+그리고 실제로는... 30k RPS도 충분합니다.
+
+---
+
+## 📜 7장: 초기 구현 및 테스트
 
 ### 슬라이드
 ```
@@ -359,7 +528,7 @@ Gateway + Redis가 **방파제** 역할을 합니다.
 
 ---
 
-## 📜 7장: 10k RPS에서 병목 발견
+## 📜 8장: 10k RPS에서 병목 발견
 
 ### 슬라이드
 ```
@@ -415,7 +584,7 @@ Redis에 부하가 집중되는 건 어쩌면 당연한 결과였습니다.
 
 ---
 
-## 📜 8장: 병목의 근본 원인
+## 📜 9장: 병목의 근본 원인
 
 ### 슬라이드
 ```
@@ -446,17 +615,72 @@ Redis KEYS 명령어:
 
 Redis CPU 100%의 원인을 찾아야 했습니다.
 
-**CloudWatch 메트릭을 분석**했습니다.
-- `CommandsProcessed`: 초당 10만+ 건
-- `NetworkBytesIn`: 비정상적으로 높음
-- `EngineCPUUtilization`: 지속적으로 100%
+**첫 번째 단계: CloudWatch 메트릭 분석**
 
-뭔가 과도한 명령어가 실행되고 있었습니다.
+AWS 콘솔에서 다음과 같이 확인했습니다:
 
-**pprof로 프로파일링**했습니다.
-Go의 `pprof`를 켜고, CPU 프로파일을 분석했습니다.
+```
+AWS Console → ElastiCache → Redis Clusters
+→ traffic-tacos-redis 클릭
+→ CloudWatch Metrics 탭
+```
 
-범인을 찾았습니다.
+확인한 주요 메트릭:
+- `EngineCPUUtilization`: **지속적으로 100%** 🔴
+  - 정상: 60% 이하
+  - 현재: 100% 유지 (위험!)
+
+- `CommandsProcessed`: **초당 10만+ 건**
+  - 정상: 3-5만 건
+  - 현재: 10만 건 이상 (비정상적으로 많음)
+
+- `NetworkBytesIn`: **비정상적으로 높음**
+  - 정상: 수 MB/s
+  - 현재: 수십 MB/s (데이터 전송 과다)
+
+이 메트릭들이 말해주는 것:
+"Redis가 너무 많은 명령어를 처리하고 있다"
+"특정 명령어가 과도하게 실행되고 있다"
+
+**두 번째 단계: pprof 프로파일링**
+
+CloudWatch는 "무엇이 문제인지"는 알려주지 않습니다.
+"어디서 문제가 발생하는지" 찾아야 했습니다.
+
+Go 애플리케이션에는 `pprof`라는 강력한 프로파일링 도구가 내장되어 있습니다.
+
+```go
+// cmd/gateway/main.go
+import "github.com/gofiber/fiber/v2/middleware/pprof"
+
+app.Use(pprof.New())
+```
+
+이렇게 설정하면, `/debug/pprof/` 엔드포인트로 접근할 수 있습니다.
+
+**프로파일링 실행:**
+```bash
+# CPU 프로파일 30초간 수집
+curl http://gateway-api:8000/debug/pprof/profile?seconds=30 > cpu.prof
+
+# 프로파일 분석 (top 함수들)
+go tool pprof -top cpu.prof
+
+# 웹 UI로 보기
+go tool pprof -http=:8080 cpu.prof
+```
+
+**분석 결과:**
+```
+Showing nodes accounting for 3.5s, 85% of 4.1s total
+      flat  flat%   sum%        cum   cum%
+     2.1s 51.22% 51.22%      2.5s 60.98%  calculateGlobalPosition
+     0.8s 19.51% 70.73%      0.9s 21.95%  redis.Keys
+     0.3s  7.32% 78.05%      0.4s  9.76%  redis.XLen
+     ...
+```
+
+범인을 찾았습니다!
 ```go
 // internal/queue/streams.go
 func (sq *StreamQueue) calculateGlobalPosition(...) int {
@@ -466,7 +690,9 @@ func (sq *StreamQueue) calculateGlobalPosition(...) int {
 }
 ```
 
-**`calculateGlobalPosition()` 함수**가 문제였습니다.
+**`calculateGlobalPosition()` 함수가 CPU의 51%를 차지**하고 있었습니다.
+그리고 그 안에서 `redis.Keys()` 호출이 대부분의 시간을 소비했습니다.
+
 이 함수는 **Status API**에서 호출됩니다.
 
 **Status API**는 사용자가 자신의 순번을 조회하는 API입니다.
@@ -494,7 +720,7 @@ Redis가 버틸 수 없었죠.
 
 ---
 
-## 📜 9장: 해결 방법 - Position Index
+## 📜 10장: 해결 방법 - Position Index
 
 ### 슬라이드
 ```
@@ -571,7 +797,7 @@ ZSET 기반의 인덱스입니다.
 
 ---
 
-## 📜 10장: 추가 최적화들
+## 📜 11장: 추가 최적화들
 
 ### 슬라이드
 ```
@@ -637,7 +863,7 @@ Readiness Probe가 5초만 기다리고 NotReady 판정.
 
 ---
 
-## 📜 11장: 최종 결과
+## 📜 12장: 최종 결과
 
 ### 슬라이드
 ```
@@ -686,7 +912,7 @@ ElastiCache: cache.m7g.xlarge × 10 nodes 유지
 
 ---
 
-## 📜 12장: 설계 검증
+## 📜 13장: 설계 검증
 
 ### 슬라이드
 ```
@@ -751,7 +977,7 @@ Trade-off 수용:
 
 ---
 
-## 📜 13장: 설계 과정의 교훈
+## 📜 14장: 설계 과정의 교훈
 
 ### 슬라이드
 ```
@@ -824,7 +1050,7 @@ pprof 없었으면, KEYS가 문제인지 몰랐을 겁니다.
 
 ---
 
-## 📜 14장: 실전 팁
+## 📜 15장: 실전 팁
 
 ### 슬라이드
 ```
@@ -907,7 +1133,7 @@ pprof 없었으면, KEYS가 문제인지 몰랐을 겁니다.
 
 ---
 
-## 📜 15장: 마무리
+## 📜 16장: 마무리
 
 ### 슬라이드
 ```
@@ -917,13 +1143,17 @@ pprof 없었으면, KEYS가 문제인지 몰랐을 겁니다.
 1️⃣ 문제 정의: 30만 명, 실시간, 공정성
 2️⃣ 설계 고민: Direct vs Queue vs Gateway
 3️⃣ 우리의 선택: Gateway + Redis + 입장 제어
-4️⃣ Trade-off 수용: Gateway 부하 집중
-5️⃣ 구현 및 검증: 1k RPS → 작동 확인
-6️⃣ 병목 발견: 10k RPS → Redis CPU 100%
-7️⃣ 근본 원인: KEYS 명령어 (O(N))
-8️⃣ 해결: Position Index (O(log N))
-9️⃣ 세부 튜닝: Pool, Memory, Probe
-🔟 결과: 30k RPS, 비용 0원
+4️⃣ 왜 Redis인가: ZSET, Lua, TTL, Cluster
+5️⃣ 설계 구조: 방파제 아키텍처
+5️⃣-1️⃣ 용량 산정: 왜 1,000 RPS인가?
+6️⃣ 인스턴스 선정: cache.m7g.xlarge × 10
+7️⃣ 구현 및 검증: 1k RPS → 작동 확인
+8️⃣ 병목 발견: 10k RPS → Redis CPU 100%
+9️⃣ 근본 원인: CloudWatch + pprof → KEYS 명령어
+🔟 해결: Position Index (O(log N))
+1️⃣1️⃣ 세부 튜닝: Pool, Memory, Probe
+1️⃣2️⃣ 결과: 30k RPS, 비용 0원
+1️⃣3️⃣ 설계 검증: 가설 증명, Trade-off 해결
 
 
 핵심 교훈:
