@@ -54,7 +54,7 @@ type RedisConfig struct {
 	ClusterMode         bool          `envconfig:"CLUSTER_MODE" default:"false"`    // ElastiCache Cluster Mode Enabled
 	RouteByLatency      bool          `envconfig:"ROUTE_BY_LATENCY" default:"true"` // Route reads to fastest replica
 	RouteRandomly       bool          `envconfig:"ROUTE_RANDOMLY" default:"false"`  // Random read replica routing
-	ReadOnly            bool          `envconfig:"READ_ONLY" default:"true"`        // Prefer replicas for read commands
+	ReadOnly            bool          `envconfig:"READ_ONLY" default:"false"`       // ✅ Must be false for write operations (JOIN, ZADD, XADD)
 }
 
 type JWTConfig struct {
