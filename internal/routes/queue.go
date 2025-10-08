@@ -193,13 +193,20 @@ func (q *QueueHandler) Join(c *fiber.Ctx) error {
 		q.logger.WithError(err).Warn("Failed to create heartbeat key")
 	}
 
+	// 🔴 NEW: Update position index for fast Status API lookups (O(log N) vs O(N))
+	// This ZSET-based index eliminates expensive KEYS scan in Status API
+	if err := q.streamQueue.UpdatePositionIndex(ctx, req.EventID, waitingToken); err != nil {
+		// Log error but don't fail the request (position index is optimization only)
+		q.logger.WithError(err).WithField("waiting_token", waitingToken).Warn("Failed to update position index")
+	}
+
 	q.logger.WithFields(logrus.Fields{
 		"waiting_token": waitingToken,
 		"stream_id":     result.StreamID,
 		"event_id":      req.EventID,
 		"user_id":       req.UserID,
 		"position":      position,
-	}).Info("User joined queue via Lua + Streams + ZSET")
+	}).Info("User joined queue via Lua + Streams + ZSET + Position Index")
 
 	return c.Status(fiber.StatusAccepted).JSON(JoinQueueResponse{
 		WaitingToken: waitingToken,
@@ -470,30 +477,43 @@ func (q *QueueHandler) getQueueData(ctx context.Context, waitingToken string) (*
 }
 
 func (q *QueueHandler) calculatePositionAndETA(ctx context.Context, queueData *QueueData, waitingToken string) (int, int) {
-	// Try to get position from Stream first (new approach)
-	streamKey := fmt.Sprintf("stream:event:{%s}:user:%s", queueData.EventID, queueData.UserID)
+	// 🔴 OPTIMIZATION: Try Position Index (ZSET) first - O(log N), fastest!
+	// This eliminates expensive KEYS scan from Stream approach
+	position, err := q.streamQueue.CalculateApproximatePosition(ctx, queueData.EventID, waitingToken)
+	if err == nil && position > 0 {
+		// Success! Use fast ZSET-based position
+		slidingWindow := queue.NewSlidingWindowMetrics(q.redisClient, queueData.EventID, q.logger)
+		eta := slidingWindow.CalculateAdvancedETA(ctx, position)
 
-	// Get all stream entries for this user
+		q.logger.WithFields(logrus.Fields{
+			"waiting_token": waitingToken,
+			"position":      position,
+			"eta":           eta,
+			"method":        "position_index", // Fast path
+		}).Debug("Calculated position from Position Index (O(log N))")
+
+		return position, eta
+	}
+
+	// Fallback 1: Try Stream-based calculation (more accurate but slower)
+	streamKey := fmt.Sprintf("stream:event:{%s}:user:%s", queueData.EventID, queueData.UserID)
 	entries, err := q.redisClient.XRange(ctx, streamKey, "-", "+").Result()
 	if err == nil && len(entries) > 0 {
-		// Find the entry with matching token
 		for _, entry := range entries {
 			if token, ok := entry.Values["token"].(string); ok && token == waitingToken {
-				// Calculate global position using StreamQueue
+				// Use optimized SCAN-based position calculation (not KEYS)
 				position, err := q.streamQueue.GetGlobalPosition(ctx, queueData.EventID, queueData.UserID, entry.ID)
 				if err == nil {
-					// Use advanced sliding window ETA calculation
 					slidingWindow := queue.NewSlidingWindowMetrics(q.redisClient, queueData.EventID, q.logger)
 					eta := slidingWindow.CalculateAdvancedETA(ctx, position)
-					confidence := slidingWindow.GetETAConfidence(ctx)
 
 					q.logger.WithFields(logrus.Fields{
 						"waiting_token": waitingToken,
 						"stream_id":     entry.ID,
 						"position":      position,
 						"eta":           eta,
-						"confidence":    confidence,
-					}).Debug("Calculated position and ETA from Stream")
+						"method":        "stream_fallback",
+					}).Debug("Calculated position from Stream (fallback)")
 
 					return position, eta
 				}
@@ -501,7 +521,7 @@ func (q *QueueHandler) calculatePositionAndETA(ctx context.Context, queueData *Q
 		}
 	}
 
-	// Fallback to ZSET-based calculation (legacy support)
+	// Fallback 2: Legacy ZSET (compatibility)
 	eventQueueKey := fmt.Sprintf("queue:event:%s", queueData.EventID)
 	rank, err := q.redisClient.ZRank(ctx, eventQueueKey, waitingToken).Result()
 	if err != nil {
@@ -512,20 +532,16 @@ func (q *QueueHandler) calculatePositionAndETA(ctx context.Context, queueData *Q
 		return queueData.Position, 60 // Default ETA
 	}
 
-	position := int(rank) + 1
-
-	// Use advanced sliding window ETA calculation
+	position = int(rank) + 1
 	slidingWindow := queue.NewSlidingWindowMetrics(q.redisClient, queueData.EventID, q.logger)
 	eta := slidingWindow.CalculateAdvancedETA(ctx, position)
-	confidence := slidingWindow.GetETAConfidence(ctx)
 
 	q.logger.WithFields(logrus.Fields{
 		"waiting_token": waitingToken,
 		"position":      position,
 		"eta":           eta,
-		"confidence":    confidence,
-		"method":        "fallback_zset",
-	}).Debug("Calculated position and ETA with sliding window (fallback)")
+		"method":        "legacy_zset",
+	}).Debug("Calculated position with legacy ZSET (final fallback)")
 
 	return position, eta
 }
