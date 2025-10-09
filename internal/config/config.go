@@ -76,13 +76,13 @@ type BackendConfig struct {
 }
 
 type ReservationAPIConfig struct {
-	GRPCAddress string        `envconfig:"GRPC_ADDRESS" default:"reservation-api.tickets-api.svc.cluster.local:9090"`
+	GRPCAddress string        `envconfig:"GRPC_ADDRESS" default:"reservation-api.tickets-api.svc.cluster.local:8011"`
 	Timeout     time.Duration `envconfig:"TIMEOUT" default:"600ms"`
 	TLSEnabled  bool          `envconfig:"TLS_ENABLED" default:"false"`
 }
 
 type PaymentAPIConfig struct {
-	GRPCAddress string        `envconfig:"GRPC_ADDRESS" default:"payment-sim-api.tickets-api.svc.cluster.local:9090"`
+	GRPCAddress string        `envconfig:"GRPC_ADDRESS" default:"payment-sim-api.tickets-api.svc.cluster.local:8031"`
 	Timeout     time.Duration `envconfig:"TIMEOUT" default:"400ms"`
 	TLSEnabled  bool          `envconfig:"TLS_ENABLED" default:"false"`
 }
